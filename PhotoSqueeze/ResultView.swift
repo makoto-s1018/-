@@ -5,6 +5,10 @@ struct ResultView: View {
     @Bindable var runner: JobRunner
     let onClose: () -> Void
 
+    private var isVideo: Bool { runner.settings.mode == .video }
+    private var noun: String { isVideo ? "動画" : "写真" }
+    private var unit: String { isVideo ? "本" : "枚" }
+
     var body: some View {
         NavigationStack {
             List {
@@ -50,14 +54,23 @@ struct ResultView: View {
         Section {
             VStack(alignment: .leading, spacing: 8) {
                 ProgressView(value: Double(runner.results.count), total: Double(max(runner.total, 1)))
-                Text("\(runner.results.count) / \(runner.total) 枚")
+                Text("\(runner.results.count) / \(runner.total) \(unit)")
                     .font(.headline)
+                if isVideo, !runner.currentFilename.isEmpty {
+                    ProgressView(value: runner.currentProgress) {
+                        Text("この動画：\(Int(runner.currentProgress * 100))%")
+                            .font(.caption)
+                    }
+                    .tint(.green)
+                }
                 if !runner.currentFilename.isEmpty {
                     Text(runner.currentFilename)
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
-                Text("処理中はアプリを閉じないでください。iCloud上の写真はダウンロードに時間がかかることがあります。")
+                Text(isVideo
+                     ? "処理中はアプリを開いたままにしてください（ほかのアプリに切り替えると失敗します）。動画は1本あたり数十秒〜数分かかります。"
+                     : "処理中はアプリを閉じないでください。iCloud上の写真はダウンロードに時間がかかることがあります。")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -76,15 +89,15 @@ struct ResultView: View {
         let percent = before > 0 ? Int((1 - Double(after) / Double(before)) * 100) : 0
 
         return Section {
-            LabeledContent("保存した写真", value: "\(saved)枚")
-            if skipped > 0 { LabeledContent("スキップ", value: "\(skipped)枚") }
-            if failed > 0 { LabeledContent("失敗", value: "\(failed)枚") }
+            LabeledContent("保存した\(noun)", value: "\(saved)\(unit)")
+            if skipped > 0 { LabeledContent("スキップ", value: "\(skipped)\(unit)") }
+            if failed > 0 { LabeledContent("失敗", value: "\(failed)\(unit)") }
             if runner.isCancelled {
-                LabeledContent("中止", value: "\(runner.total - runner.results.count)枚は未処理")
+                LabeledContent("中止", value: "\(runner.total - runner.results.count)\(unit)は未処理")
             }
             if saved > 0 {
                 LabeledContent("サイズ", value: "\(before.byteString) → \(after.byteString)")
-                if runner.settings.mode == .compress {
+                if runner.settings.mode.shrinks {
                     LabeledContent("削減", value: "\((before - after).byteString)（\(percent)%）")
                         .foregroundStyle(.green)
                 }
@@ -93,7 +106,7 @@ struct ResultView: View {
             Text(runner.settings.mode.title + "の結果")
         } footer: {
             if saved > 0 {
-                Text("新しい写真は元の写真と同じ撮影日で、写真アプリに保存されています。")
+                Text("新しい\(noun)は元の\(noun)と同じ撮影日で、写真アプリに保存されています。")
             }
         }
     }
@@ -106,7 +119,7 @@ struct ResultView: View {
 
         return Section {
             if targets.isEmpty {
-                Label("選択した元の写真は削除済みです", systemImage: "checkmark.circle")
+                Label("選択した元の\(noun)は削除済みです", systemImage: "checkmark.circle")
                     .foregroundStyle(.secondary)
             } else {
                 HStack {
@@ -121,15 +134,15 @@ struct ResultView: View {
                 } label: {
                     HStack {
                         if runner.isDeleting { ProgressView() }
-                        Label("選択した元の写真を削除（\(selectedCount)枚）", systemImage: "trash")
+                        Label("選択した元の\(noun)を削除（\(selectedCount)\(unit)）", systemImage: "trash")
                     }
                 }
                 .disabled(selectedCount == 0 || runner.isDeleting)
             }
         } header: {
-            Text("元の写真を削除しますか？")
+            Text("元の\(noun)を削除しますか？")
         } footer: {
-            Text("削除しない場合はそのまま「閉じる」を押してください。下の一覧で削除する写真を個別に選べます。削除した写真は「最近削除した項目」に30日間残ります。")
+            Text("削除しない場合はそのまま「閉じる」を押してください。下の一覧で削除する\(noun)を個別に選べます。削除した\(noun)は「最近削除した項目」に30日間残ります。")
         }
     }
 
@@ -140,6 +153,7 @@ struct ResultView: View {
             ForEach(runner.results.reversed()) { result in
                 ResultRow(
                     result: result,
+                    noun: noun,
                     showsDeleteToggle: !runner.isRunning && result.isSaved,
                     isDeleted: runner.deletedIDs.contains(result.id),
                     isMarkedForDelete: runner.deleteSelection.contains(result.id),
@@ -152,6 +166,7 @@ struct ResultView: View {
 
 private struct ResultRow: View {
     let result: JobResult
+    let noun: String
     let showsDeleteToggle: Bool
     let isDeleted: Bool
     let isMarkedForDelete: Bool
@@ -171,7 +186,7 @@ private struct ResultRow: View {
                             .font(.title2)
                     }
                     .buttonStyle(.borderless)
-                    .accessibilityLabel(isMarkedForDelete ? "元の写真を削除する" : "元の写真を残す")
+                    .accessibilityLabel(isMarkedForDelete ? "元の\(noun)を削除する" : "元の\(noun)を残す")
                 }
             }
             VStack(alignment: .leading, spacing: 2) {
@@ -187,7 +202,7 @@ private struct ResultRow: View {
     private var detail: some View {
         switch result.status {
         case .saved:
-            Text("\(result.originalBytes.byteString) → \(result.newBytes.byteString)" + (isDeleted ? "　元の写真は削除済み" : ""))
+            Text("\(result.originalBytes.byteString) → \(result.newBytes.byteString)" + (isDeleted ? "　元の\(noun)は削除済み" : ""))
         case .skipped(let reason):
             Text("スキップ：\(reason)")
         case .failed(let reason):

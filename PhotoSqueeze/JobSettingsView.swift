@@ -4,19 +4,23 @@ import SwiftUI
 struct JobSettingsView: View {
     let mode: JobMode
     let count: Int
+    /// 選択中の動画の合計時間（秒）
+    let videoDuration: TimeInterval
     let onStart: (JobSettings) -> Void
 
     @Environment(\.dismiss) private var dismiss
     @State private var format: OutputFormat
     @State private var quality: Double
     @State private var maxDimension: Int
+    @State private var videoPreset: VideoPreset = .medium
 
     /// 0 は「元のサイズ」
     private let dimensionChoices = [0, 4032, 3024, 2048, 1600, 1280, 1024]
 
-    init(mode: JobMode, count: Int, onStart: @escaping (JobSettings) -> Void) {
+    init(mode: JobMode, count: Int, videoDuration: TimeInterval = 0, onStart: @escaping (JobSettings) -> Void) {
         self.mode = mode
         self.count = count
+        self.videoDuration = videoDuration
         self.onStart = onStart
         _format = State(initialValue: .jpeg)
         let preset = CompressionPreset.medium
@@ -38,47 +42,16 @@ struct JobSettingsView: View {
     var body: some View {
         NavigationStack {
             Form {
-                if mode == .compress {
-                    presetSection
+                if mode == .video {
+                    videoPresetSection
+                } else {
+                    imageSections
                 }
 
                 Section {
-                    Picker(mode == .compress ? "保存形式" : "変換先", selection: $format) {
-                        ForEach(formatChoices) { Text($0.rawValue).tag($0) }
-                    }
-                    .pickerStyle(.segmented)
-                } footer: {
-                    Text(formatNote)
-                }
-
-                if format.isLossy {
-                    Section(mode == .compress ? "細かく調整：画質 \(Int(quality * 100))%" : "画質 \(Int(quality * 100))%") {
-                        Slider(value: $quality, in: 0.3...1.0, step: 0.05) {
-                            Text("画質")
-                        } minimumValueLabel: {
-                            Text("小").font(.caption)
-                        } maximumValueLabel: {
-                            Text("高").font(.caption)
-                        }
-                    }
-                }
-
-                if mode == .compress {
-                    Section {
-                        Picker("最大サイズ（長辺）", selection: $maxDimension) {
-                            ForEach(dimensionChoices, id: \.self) { value in
-                                Text(value == 0 ? "元のサイズ" : "\(value) px").tag(value)
-                            }
-                        }
-                    } footer: {
-                        Text("画質やサイズを変えると「カスタム」になります。")
-                    }
-                }
-
-                Section {
-                    Label("元の写真はそのまま残ります。処理が終わったあとに、元の写真を削除するかどうかを選べます。", systemImage: "info.circle")
+                    Label("元の\(noun)はそのまま残ります。処理が終わったあとに、元の\(noun)を削除するかどうかを選べます。", systemImage: "info.circle")
                         .font(.footnote)
-                    Label("撮影日・位置情報は元の写真から引き継ぎます。", systemImage: "calendar")
+                    Label("撮影日・位置情報は元の\(noun)から引き継ぎます。", systemImage: "calendar")
                         .font(.footnote)
                 }
             }
@@ -95,10 +68,11 @@ struct JobSettingsView: View {
                         mode: mode,
                         format: format,
                         quality: quality,
-                        maxDimension: maxDimension == 0 ? nil : maxDimension
+                        maxDimension: maxDimension == 0 ? nil : maxDimension,
+                        videoPreset: videoPreset
                     ))
                 } label: {
-                    Text("\(count)枚を\(mode == .compress ? "圧縮" : "\(format.rawValue)に変換")")
+                    Text(startTitle)
                         .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.borderedProminent)
@@ -108,6 +82,113 @@ struct JobSettingsView: View {
             }
         }
         .presentationDetents([.large])
+    }
+
+    private var noun: String { mode == .video ? "動画" : "写真" }
+
+    private var startTitle: String {
+        switch mode {
+        case .compress: "\(count)枚を圧縮"
+        case .convert: "\(count)枚を\(format.rawValue)に変換"
+        case .video: "\(count)本の動画を圧縮"
+        }
+    }
+
+    // MARK: - 写真
+
+    @ViewBuilder
+    private var imageSections: some View {
+        if mode == .compress {
+            presetSection
+        }
+
+        Section {
+            Picker(mode == .compress ? "保存形式" : "変換先", selection: $format) {
+                ForEach(formatChoices) { Text($0.rawValue).tag($0) }
+            }
+            .pickerStyle(.segmented)
+        } footer: {
+            Text(formatNote)
+        }
+
+        if format.isLossy {
+            Section(mode == .compress ? "細かく調整：画質 \(Int(quality * 100))%" : "画質 \(Int(quality * 100))%") {
+                Slider(value: $quality, in: 0.3...1.0, step: 0.05) {
+                    Text("画質")
+                } minimumValueLabel: {
+                    Text("小").font(.caption)
+                } maximumValueLabel: {
+                    Text("高").font(.caption)
+                }
+            }
+        }
+
+        if mode == .compress {
+            Section {
+                Picker("最大サイズ（長辺）", selection: $maxDimension) {
+                    ForEach(dimensionChoices, id: \.self) { value in
+                        Text(value == 0 ? "元のサイズ" : "\(value) px").tag(value)
+                    }
+                }
+            } footer: {
+                Text("画質やサイズを変えると「カスタム」になります。")
+            }
+        }
+    }
+
+    // MARK: - 動画
+
+    private var videoPresetSection: some View {
+        Section {
+            ForEach(VideoPreset.allCases) { preset in
+                Button {
+                    videoPreset = preset
+                } label: {
+                    HStack(spacing: 12) {
+                        Image(systemName: videoPreset == preset ? "checkmark.circle.fill" : "circle")
+                            .font(.title3)
+                            .foregroundStyle(videoPreset == preset ? Color.accentColor : Color.secondary)
+                        VStack(alignment: .leading, spacing: 2) {
+                            HStack {
+                                Text(preset.title).font(.body.bold())
+                                Spacer()
+                                Text("1分 約\(preset.megabytesPerMinute)MB")
+                                    .font(.subheadline.monospacedDigit())
+                                    .foregroundStyle(.secondary)
+                            }
+                            Text(preset.usage)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            Text(preset.detail)
+                                .font(.caption2)
+                                .foregroundStyle(.tertiary)
+                        }
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
+        } header: {
+            Text("用途を選ぶ")
+        } footer: {
+            VStack(alignment: .leading, spacing: 4) {
+                if videoDuration > 0 {
+                    Text("選択中の動画：合計 \(Self.minutesText(videoDuration))　→　圧縮後 約\(estimatedTotal)")
+                        .bold()
+                }
+                Text("参考：iPhoneの標準（4K・30コマ）は1分あたり約170MB、フルHD（30コマ）は約60MBです。元より大きくなる動画は自動でスキップします。")
+            }
+        }
+    }
+
+    private var estimatedTotal: String {
+        let megabytes = Double(videoPreset.megabytesPerMinute) * videoDuration / 60
+        return megabytes >= 1000 ? String(format: "%.1fGB", megabytes / 1000) : "\(Int(megabytes.rounded()))MB"
+    }
+
+    private static func minutesText(_ seconds: TimeInterval) -> String {
+        let total = Int(seconds.rounded())
+        return total >= 60 ? "\(total / 60)分\(total % 60)秒" : "\(total)秒"
     }
 
     private var presetSection: some View {

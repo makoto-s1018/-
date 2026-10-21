@@ -30,7 +30,11 @@ struct ContentView: View {
             if phase == .active { library.load() }
         }
         .sheet(item: $settingsMode, onDismiss: startPendingJob) { mode in
-            JobSettingsView(mode: mode, count: library.selection.count) { settings in
+            JobSettingsView(
+                mode: mode,
+                count: library.selection.count,
+                videoDuration: library.selectedAssets.reduce(0) { $0 + $1.duration }
+            ) { settings in
                 pendingSettings = settings
                 settingsMode = nil
             }
@@ -64,6 +68,14 @@ struct ContentView: View {
     private var photoList: some View {
         @Bindable var library = library
         return ScrollView {
+            Picker("種類", selection: $library.mediaKind) {
+                ForEach(MediaKind.allCases) { kind in
+                    Label(kind.rawValue, systemImage: kind == .photo ? "photo" : "video").tag(kind)
+                }
+            }
+            .pickerStyle(.segmented)
+            .padding(.horizontal)
+
             Picker("まとめ方", selection: $library.grouping) {
                 ForEach(Grouping.allCases) { Text($0.rawValue).tag($0) }
             }
@@ -72,7 +84,8 @@ struct ContentView: View {
             .padding(.bottom, 4)
 
             if library.assets.isEmpty {
-                ContentUnavailableView("写真がありません", systemImage: "photo.on.rectangle")
+                ContentUnavailableView("\(library.mediaKind.rawValue)がありません",
+                                       systemImage: library.mediaKind == .photo ? "photo.on.rectangle" : "video.slash")
                     .padding(.top, 80)
             }
 
@@ -94,11 +107,13 @@ struct ContentView: View {
     private var toolbarContent: some ToolbarContent {
         if library.hasAccess {
             ToolbarItem(placement: .topBarLeading) {
-                Button {
-                    showsDuplicates = true
-                } label: {
-                    Label("重複を探す", systemImage: "square.on.square")
-                        .labelStyle(.titleAndIcon)
+                if library.mediaKind == .photo {
+                    Button {
+                        showsDuplicates = true
+                    } label: {
+                        Label("重複を探す", systemImage: "square.on.square")
+                            .labelStyle(.titleAndIcon)
+                    }
                 }
             }
             ToolbarItem(placement: .topBarTrailing) {
@@ -118,25 +133,37 @@ struct ContentView: View {
 
     private var bottomBar: some View {
         VStack(spacing: 8) {
-            Text(library.selection.isEmpty ? "写真をタップ、または日付の「選択」でまとめて選べます" : "\(library.selection.count)枚を選択中")
+            Text(library.selection.isEmpty
+                 ? "\(library.mediaKind.rawValue)をタップ、または日付の「選択」でまとめて選べます"
+                 : "\(library.selection.count)\(library.mediaKind.unit)を選択中")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
             HStack(spacing: 12) {
-                Button {
-                    settingsMode = .compress
-                } label: {
-                    Label("圧縮", systemImage: "arrow.down.right.and.arrow.up.left")
-                        .frame(maxWidth: .infinity)
-                }
-                .buttonStyle(.borderedProminent)
+                if library.mediaKind == .video {
+                    Button {
+                        settingsMode = .video
+                    } label: {
+                        Label("動画を圧縮", systemImage: "arrow.down.right.and.arrow.up.left")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.borderedProminent)
+                } else {
+                    Button {
+                        settingsMode = .compress
+                    } label: {
+                        Label("圧縮", systemImage: "arrow.down.right.and.arrow.up.left")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.borderedProminent)
 
-                Button {
-                    settingsMode = .convert
-                } label: {
-                    Label("JPEG / PNG 変換", systemImage: "arrow.triangle.2.circlepath")
-                        .frame(maxWidth: .infinity)
+                    Button {
+                        settingsMode = .convert
+                    } label: {
+                        Label("JPEG / PNG 変換", systemImage: "arrow.triangle.2.circlepath")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.bordered)
                 }
-                .buttonStyle(.bordered)
             }
             .controlSize(.large)
             .disabled(library.selection.isEmpty)
@@ -166,7 +193,7 @@ private struct GroupHeader: View {
                         .font(.caption.bold())
                         .frame(width: 14)
                     Text(group.title).font(.headline)
-                    Text("\(group.assets.count)枚")
+                    Text("\(group.assets.count)\(library.mediaKind.unit)")
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                 }
@@ -230,6 +257,15 @@ private struct ThumbnailCell: View {
             .overlay {
                 if isSelected { Color.black.opacity(0.25) }
             }
+            .overlay(alignment: .bottomLeading) {
+                if asset.mediaType == .video {
+                    Text(Self.durationText(asset.duration))
+                        .font(.caption2.bold().monospacedDigit())
+                        .foregroundStyle(.white)
+                        .shadow(radius: 1)
+                        .padding(4)
+                }
+            }
             .overlay(alignment: .bottomTrailing) {
                 Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
                     .font(.title3)
@@ -241,6 +277,16 @@ private struct ThumbnailCell: View {
             .contentShape(Rectangle())
             .onTapGesture { library.toggle(asset) }
             .task(id: asset.localIdentifier) { image = await loadThumbnail() }
+    }
+
+    static func durationText(_ seconds: TimeInterval) -> String {
+        let total = Int(seconds.rounded())
+        let hours = total / 3600
+        let minutes = total % 3600 / 60
+        let secs = total % 60
+        return hours > 0
+            ? String(format: "%d:%02d:%02d", hours, minutes, secs)
+            : String(format: "%d:%02d", minutes, secs)
     }
 
     private func loadThumbnail() async -> UIImage? {

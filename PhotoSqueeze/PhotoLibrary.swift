@@ -10,6 +10,17 @@ enum Grouping: String, CaseIterable, Identifiable {
     var id: Self { self }
 }
 
+/// 一覧に出すもの
+enum MediaKind: String, CaseIterable, Identifiable {
+    case photo = "写真"
+    case video = "動画"
+
+    var id: Self { self }
+    var assetType: PHAssetMediaType { self == .photo ? .image : .video }
+    /// 数える単位
+    var unit: String { self == .photo ? "枚" : "本" }
+}
+
 struct PhotoGroup: Identifiable {
     let id: String
     let title: String
@@ -25,6 +36,15 @@ final class PhotoLibrary {
     private(set) var groups: [PhotoGroup] = []
     var selection: Set<String> = []
     var collapsed: Set<String> = []
+
+    var mediaKind: MediaKind = .photo {
+        didSet {
+            guard mediaKind != oldValue else { return }
+            selection = []
+            collapsed = []
+            load()
+        }
+    }
 
     var grouping: Grouping = .month {
         didSet {
@@ -50,7 +70,7 @@ final class PhotoLibrary {
         guard hasAccess else { return }
         let options = PHFetchOptions()
         options.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: false)]
-        let result = PHAsset.fetchAssets(with: .image, options: options)
+        let result = PHAsset.fetchAssets(with: mediaKind.assetType, options: options)
         var list: [PHAsset] = []
         list.reserveCapacity(result.count)
         result.enumerateObjects { asset, _, _ in list.append(asset) }

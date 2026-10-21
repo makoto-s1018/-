@@ -34,6 +34,8 @@ final class JobRunner: Identifiable {
     private(set) var isRunning = false
     private(set) var isCancelled = false
     private(set) var currentFilename = ""
+    /// 処理中の1本（動画）の進み具合 0〜1
+    private(set) var currentProgress: Double = 0
 
     /// 削除する元写真（保存に成功したものだけが対象）
     var deleteSelection: Set<String> = []
@@ -67,6 +69,7 @@ final class JobRunner: Identifiable {
     }
 
     private func process(_ asset: PHAsset) async -> JobResult {
+        if settings.mode == .video { return await processVideo(asset) }
         let id = asset.localIdentifier
         var filename = ""
         var originalBytes = 0
@@ -95,6 +98,43 @@ final class JobRunner: Identifiable {
             let newName = ImageProcessor.outputFilename(for: filename, format: settings.format)
             try await ImageProcessor.save(encoded, filename: newName, copying: asset)
             return JobResult(id: id, filename: newName, originalBytes: originalBytes, newBytes: encoded.count,
+                             status: .saved)
+        } catch {
+            return JobResult(id: id, filename: filename.isEmpty ? "（不明）" : filename,
+                             originalBytes: originalBytes, newBytes: 0,
+                             status: .failed(error.localizedDescription))
+        }
+    }
+
+    private func processVideo(_ asset: PHAsset) async -> JobResult {
+        let id = asset.localIdentifier
+        var filename = ""
+        var originalBytes = 0
+        let tempURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+            .appendingPathExtension("mov")
+        defer { try? FileManager.default.removeItem(at: tempURL) }
+
+        do {
+            let source = try await VideoProcessor.loadSource(for: asset)
+            filename = source.filename
+            originalBytes = source.originalBytes
+            currentFilename = filename
+            currentProgress = 0
+
+            try await VideoProcessor.compress(source.avAsset, to: tempURL, preset: settings.videoPreset) { value in
+                Task { @MainActor [weak self] in self?.currentProgress = value }
+            }
+
+            let newBytes = (try? tempURL.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+            if originalBytes > 0, newBytes >= originalBytes {
+                return JobResult(id: id, filename: filename, originalBytes: originalBytes, newBytes: newBytes,
+                                 status: .skipped("これ以上小さくなりません"))
+            }
+
+            let newName = VideoProcessor.outputFilename(for: filename)
+            try await VideoProcessor.save(fileURL: tempURL, filename: newName, copying: asset)
+            return JobResult(id: id, filename: newName, originalBytes: originalBytes, newBytes: newBytes,
                              status: .saved)
         } catch {
             return JobResult(id: id, filename: filename.isEmpty ? "（不明）" : filename,

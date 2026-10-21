@@ -5,9 +5,20 @@ import UniformTypeIdentifiers
 enum JobMode: String, Identifiable {
     case compress
     case convert
+    case video
 
     var id: Self { self }
-    var title: String { self == .compress ? "圧縮" : "JPEG / PNG 変換" }
+
+    var title: String {
+        switch self {
+        case .compress: "圧縮"
+        case .convert: "JPEG / PNG 変換"
+        case .video: "動画を圧縮"
+        }
+    }
+
+    /// 元の大きさから小さくすることが目的か（大きくなる場合はスキップする）
+    var shrinks: Bool { self != .convert }
 }
 
 enum OutputFormat: String, CaseIterable, Identifiable {
@@ -43,6 +54,8 @@ struct JobSettings {
     var quality: Double
     /// 長辺の最大ピクセル数。nil なら元のサイズ
     var maxDimension: Int?
+    /// 動画の圧縮設定（mode が .video のときに使う）
+    var videoPreset: VideoPreset = .medium
 }
 
 enum ProcessingError: LocalizedError {
