@@ -1,3 +1,4 @@
+# GitHub のクラウド上の Mac でアプリをビルドし、iPhone に入れるための .ipa ファイルを作る
 name: iPhoneアプリをビルド
 
 on:
@@ -12,10 +13,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Xcode のバージョン
-        run: xcodebuild -version
+      - name: 最新の Xcode を選ぶ（iOS 26 の機能を使うため）
+        run: |
+          latest=$(ls -d /Applications/Xcode_*.app | sort -V | tail -1)
+          echo "使用する Xcode: $latest"
+          sudo xcode-select -s "$latest"
+          xcodebuild -version
 
-      - name: ビルド
+      - name: ビルド（署名なし。署名は Sideloadly が自分の Apple ID で行う）
         run: |
           xcodebuild \
             -project PhotoSqueeze.xcodeproj \
