@@ -123,7 +123,7 @@ struct DuplicateView: View {
             }
         } else {
             ScrollView {
-                VStack(alignment: .leading, spacing: 12) {
+                LazyVStack(alignment: .leading, spacing: 12) {
                     summary
                     ForEach(finder.groups) { group in
                         GroupCard(finder: finder, group: group)
@@ -192,7 +192,7 @@ private struct GroupCard: View {
                 }
             }
             ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 8) {
+                LazyHStack(spacing: 8) {
                     ForEach(group.assets, id: \.localIdentifier) { asset in
                         DuplicateCell(asset: asset, marked: finder.deleteSelection.contains(asset.localIdentifier))
                             .onTapGesture { finder.toggle(asset) }

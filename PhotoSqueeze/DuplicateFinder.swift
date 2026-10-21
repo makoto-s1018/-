@@ -16,10 +16,13 @@ enum DuplicateStrictness: String, CaseIterable, Identifiable {
     /// 画像ハッシュ（64ビット）の違いが何ビットまでなら同じとみなすか
     var threshold: Int { self == .same ? 3 : 10 }
 
+    /// 似ている写真は、撮影時刻がこの秒数以内のものだけをまとめる（連写・続けて撮った写真）
+    var maxTimeGap: TimeInterval? { self == .same ? nil : 10 * 60 }
+
     var note: String {
         switch self {
         case .same: "同じ写真の保存し直し・圧縮前後の写真・LINEなどで受け取った同じ写真を探します。"
-        case .similar: "連写や、同じ場所で続けて撮った写真もまとめて探します。残す写真をよく確認してください。"
+        case .similar: "連写や、同じ場所で続けて撮った写真（撮影時刻が10分以内）もまとめて探します。残す写真をよく確認してください。"
         }
     }
 }
@@ -74,8 +77,9 @@ final class DuplicateFinder {
 
         phase = .grouping
         let threshold = strictness.threshold
+        let maxTimeGap = strictness.maxTimeGap
         let found = await Task.detached(priority: .userInitiated) {
-            PerceptualHash.group(entries, threshold: threshold)
+            PerceptualHash.group(entries, threshold: threshold, maxTimeGap: maxTimeGap)
         }.value
 
         groups = found
@@ -171,7 +175,8 @@ final class DuplicateFinder {
                 }
                 if let hash {
                     let aspect = Double(asset.pixelWidth) / Double(max(asset.pixelHeight, 1))
-                    entries.append(.init(index: index, hash: hash, aspect: aspect))
+                    let date = asset.creationDate?.timeIntervalSince1970
+                    entries.append(.init(index: index, hash: hash, aspect: aspect, date: date))
                 }
             }
             if index % 50 == 0 { await progress(processed) }
@@ -187,7 +192,11 @@ enum PerceptualHash {
         let index: Int
         let hash: UInt64
         let aspect: Double
+        let date: TimeInterval?
     }
+
+    /// 1組あたりの上限（これを超える分は次の組に回す）
+    static let maxGroupSize = 50
 
     static func dHash(_ image: UIImage) -> UInt64? {
         guard let cgImage = image.cgImage else { return nil }
@@ -222,35 +231,34 @@ enum PerceptualHash {
         return hash
     }
 
-    /// 指紋が近く、縦横比も同じ写真をまとめる。2枚以上のグループだけを返す（中身は元の配列の番号）
-    static func group(_ entries: [Entry], threshold: Int) -> [[Int]] {
-        var parent = Array(entries.indices)
+    /// 指紋が近く、縦横比も同じ写真をまとめる。2枚以上の組だけを返す（中身は元の配列の番号）
+    /// 「AとBが似ている・BとCが似ている → A・B・Cを同じ組」という数珠つなぎはせず、
+    /// 組の最初の1枚（基準の写真）と似ているものだけを同じ組にする。巨大な組ができるのを防ぐため
+    static func group(_ entries: [Entry], threshold: Int, maxTimeGap: TimeInterval?) -> [[Int]] {
+        var assigned = [Bool](repeating: false, count: entries.count)
+        var result: [[Int]] = []
 
-        func root(_ x: Int) -> Int {
-            var x = x
-            while parent[x] != x {
-                parent[x] = parent[parent[x]]
-                x = parent[x]
+        for i in entries.indices where !assigned[i] {
+            let base = entries[i]
+            var members = [base.index]
+            var j = i + 1
+            while j < entries.count, members.count < maxGroupSize {
+                defer { j += 1 }
+                guard !assigned[j] else { continue }
+                let other = entries[j]
+                guard (base.hash ^ other.hash).nonzeroBitCount <= threshold,
+                      abs(base.aspect - other.aspect) <= base.aspect * 0.03 else { continue }
+                if let maxTimeGap {
+                    guard let a = base.date, let b = other.date, abs(a - b) <= maxTimeGap else { continue }
+                }
+                assigned[j] = true
+                members.append(other.index)
             }
-            return x
-        }
-
-        for i in entries.indices {
-            let a = entries[i]
-            for j in (i + 1)..<entries.count {
-                let b = entries[j]
-                guard (a.hash ^ b.hash).nonzeroBitCount <= threshold,
-                      abs(a.aspect - b.aspect) <= a.aspect * 0.03 else { continue }
-                let ra = root(i)
-                let rb = root(j)
-                if ra != rb { parent[rb] = ra }
+            if members.count >= 2 {
+                assigned[i] = true
+                result.append(members)
             }
         }
-
-        var buckets: [Int: [Int]] = [:]
-        for i in entries.indices {
-            buckets[root(i), default: []].append(entries[i].index)
-        }
-        return buckets.values.filter { $0.count >= 2 }
+        return result
     }
 }
