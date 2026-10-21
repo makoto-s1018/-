@@ -134,3 +134,27 @@ final class PhotoLibrary {
         return f
     }()
 }
+
+extension PHImageManager {
+    /// 写真の縮小画像を取り出す。結果が複数回届いても、最終的な画像を1回だけ返す
+    func image(for asset: PHAsset, side: CGFloat) async -> UIImage? {
+        let options = PHImageRequestOptions()
+        options.deliveryMode = .highQualityFormat
+        options.resizeMode = .fast
+        options.isNetworkAccessAllowed = true
+        return await withCheckedContinuation { continuation in
+            var resumed = false
+            requestImage(
+                for: asset,
+                targetSize: CGSize(width: side, height: side),
+                contentMode: .aspectFill,
+                options: options
+            ) { image, info in
+                let degraded = (info?[PHImageResultIsDegradedKey] as? Bool) ?? false
+                guard !resumed, !degraded else { return }
+                resumed = true
+                continuation.resume(returning: image)
+            }
+        }
+    }
+}

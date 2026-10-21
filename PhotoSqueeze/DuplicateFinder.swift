@@ -43,7 +43,7 @@ final class DuplicateFinder {
     private(set) var total = 0
     private(set) var groups: [DuplicateGroup] = []
     private(set) var isDeleting = false
-    private var cancelled = false
+    private var scanTask: Task<[PerceptualHash.Entry], Never>?
 
     var deleteSelection: Set<String> = []
     var message: String?
@@ -53,32 +53,29 @@ final class DuplicateFinder {
 
     var deleteCount: Int { deleteSelection.count }
 
-    func cancel() { cancelled = true }
+    func cancel() { scanTask?.cancel() }
 
     func scan(_ assets: [PHAsset], strictness: DuplicateStrictness) async {
         phase = .scanning
-        cancelled = false
         scanned = 0
         total = assets.count
         groups = []
         deleteSelection = []
 
-        var entries: [PerceptualHash.Entry] = []
-        entries.reserveCapacity(assets.count)
-        for (index, asset) in assets.enumerated() {
-            if cancelled { break }
-            if let image = await Self.smallImage(for: asset), let hash = PerceptualHash.dHash(image) {
-                let aspect = Double(asset.pixelWidth) / Double(max(asset.pixelHeight, 1))
-                entries.append(.init(index: index, hash: hash, aspect: aspect))
+        // 画面を止めないよう、写真の読み込みと指紋づくりはバックグラウンドで行う
+        let task = Task.detached(priority: .userInitiated) { [weak self] in
+            await DuplicateFinder.hashAll(assets) { done in
+                await MainActor.run { self?.scanned = done }
             }
-            if index % 20 == 0 || index == assets.count - 1 { scanned = index + 1 }
         }
+        scanTask = task
+        let entries = await task.value
+        scanTask = nil
 
         phase = .grouping
         let threshold = strictness.threshold
-        let hashed = entries
         let found = await Task.detached(priority: .userInitiated) {
-            PerceptualHash.group(hashed, threshold: threshold)
+            PerceptualHash.group(entries, threshold: threshold)
         }.value
 
         groups = found
@@ -142,22 +139,45 @@ final class DuplicateFinder {
         }
     }
 
-    /// 比較用の小さな画像（端末内のサムネイルを使うのでダウンロードは発生しない）
-    private static func smallImage(for asset: PHAsset) async -> UIImage? {
+    /// すべての写真の指紋を作る（中止されたらそこまでの分を返す）
+    /// 同期モードで1枚ずつ取り出すので、返事が2回届いて落ちることがない
+    nonisolated private static func hashAll(
+        _ assets: [PHAsset],
+        progress: @escaping @Sendable (Int) async -> Void
+    ) async -> [PerceptualHash.Entry] {
+        let manager = PHImageManager.default()
         let options = PHImageRequestOptions()
+        options.isSynchronous = true
         options.deliveryMode = .fastFormat
         options.resizeMode = .fast
+        // 端末内の縮小画像だけを使う（iCloudからのダウンロードは発生しない）
         options.isNetworkAccessAllowed = false
-        return await withCheckedContinuation { continuation in
-            PHImageManager.default().requestImage(
-                for: asset,
-                targetSize: CGSize(width: 64, height: 64),
-                contentMode: .aspectFit,
-                options: options
-            ) { image, _ in
-                continuation.resume(returning: image)
+
+        var entries: [PerceptualHash.Entry] = []
+        entries.reserveCapacity(assets.count)
+        var processed = 0
+        for (index, asset) in assets.enumerated() {
+            if Task.isCancelled { break }
+            processed = index + 1
+            autoreleasepool {
+                var hash: UInt64?
+                manager.requestImage(
+                    for: asset,
+                    targetSize: CGSize(width: 64, height: 64),
+                    contentMode: .aspectFit,
+                    options: options
+                ) { image, _ in
+                    if hash == nil, let image { hash = PerceptualHash.dHash(image) }
+                }
+                if let hash {
+                    let aspect = Double(asset.pixelWidth) / Double(max(asset.pixelHeight, 1))
+                    entries.append(.init(index: index, hash: hash, aspect: aspect))
+                }
             }
+            if index % 50 == 0 { await progress(processed) }
         }
+        await progress(processed)
+        return entries
     }
 }
 

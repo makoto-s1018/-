@@ -244,21 +244,7 @@ private struct ThumbnailCell: View {
     }
 
     private func loadThumbnail() async -> UIImage? {
-        let side = 120 * displayScale
-        let options = PHImageRequestOptions()
-        options.deliveryMode = .highQualityFormat
-        options.resizeMode = .fast
-        options.isNetworkAccessAllowed = true
-        return await withCheckedContinuation { continuation in
-            library.imageManager.requestImage(
-                for: asset,
-                targetSize: CGSize(width: side, height: side),
-                contentMode: .aspectFill,
-                options: options
-            ) { image, _ in
-                continuation.resume(returning: image)
-            }
-        }
+        await library.imageManager.image(for: asset, side: 120 * displayScale)
     }
 }
 

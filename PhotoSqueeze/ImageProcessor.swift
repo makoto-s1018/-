@@ -75,7 +75,10 @@ enum ImageProcessor {
         options.deliveryMode = .highQualityFormat
 
         let (data, uti): (Data, String?) = try await withCheckedThrowingContinuation { continuation in
+            var resumed = false
             PHImageManager.default().requestImageDataAndOrientation(for: asset, options: options) { data, uti, _, info in
+                guard !resumed else { return }
+                resumed = true
                 if let data {
                     continuation.resume(returning: (data, uti))
                 } else {

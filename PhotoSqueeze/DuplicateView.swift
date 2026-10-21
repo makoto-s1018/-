@@ -256,20 +256,6 @@ private struct DuplicateCell: View {
     }
 
     private func load() async -> UIImage? {
-        let side = 110 * displayScale
-        let options = PHImageRequestOptions()
-        options.deliveryMode = .highQualityFormat
-        options.resizeMode = .fast
-        options.isNetworkAccessAllowed = true
-        return await withCheckedContinuation { continuation in
-            PHImageManager.default().requestImage(
-                for: asset,
-                targetSize: CGSize(width: side, height: side),
-                contentMode: .aspectFill,
-                options: options
-            ) { image, _ in
-                continuation.resume(returning: image)
-            }
-        }
+        await PHImageManager.default().image(for: asset, side: 110 * displayScale)
     }
 }
