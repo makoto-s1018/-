@@ -8,6 +8,7 @@ struct ContentView: View {
     @State private var settingsMode: JobMode?
     @State private var runner: JobRunner?
     @State private var pendingSettings: JobSettings?
+    @State private var showsDuplicates = false
 
     var body: some View {
         NavigationStack {
@@ -38,6 +39,12 @@ struct ContentView: View {
             ResultView(runner: job) {
                 runner = nil
                 library.clearSelection()
+                library.load()
+            }
+        }
+        .fullScreenCover(isPresented: $showsDuplicates) {
+            DuplicateView(allAssets: library.assets, selectedAssets: library.selectedAssets) {
+                showsDuplicates = false
                 library.load()
             }
         }
@@ -86,6 +93,14 @@ struct ContentView: View {
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
         if library.hasAccess {
+            ToolbarItem(placement: .topBarLeading) {
+                Button {
+                    showsDuplicates = true
+                } label: {
+                    Label("重複を探す", systemImage: "square.on.square")
+                        .labelStyle(.titleAndIcon)
+                }
+            }
             ToolbarItem(placement: .topBarTrailing) {
                 Menu {
                     Button("すべて選択", systemImage: "checkmark.circle") { library.selectAll() }
