@@ -186,6 +186,7 @@
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = "";
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = "写真圧縮";
 				INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription = "圧縮・変換した写真を写真ライブラリに保存するために使用します。";
 				INFOPLIST_KEY_NSPhotoLibraryUsageDescription = "写真を日付ごとに表示し、圧縮・変換・削除するために使用します。";
@@ -215,6 +216,7 @@
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = "";
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = "写真圧縮";
 				INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription = "圧縮・変換した写真を写真ライブラリに保存するために使用します。";
 				INFOPLIST_KEY_NSPhotoLibraryUsageDescription = "写真を日付ごとに表示し、圧縮・変換・削除するために使用します。";

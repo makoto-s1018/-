@@ -28,6 +28,7 @@ struct ContentView: View {
         .task { library.load() }
         .onChange(of: scenePhase) { _, phase in
             if phase == .active { library.load() }
+            if phase == .background { runner?.appDidEnterBackground() }
         }
         .sheet(item: $settingsMode, onDismiss: startPendingJob) { mode in
             JobSettingsView(
@@ -60,7 +61,7 @@ struct ContentView: View {
         pendingSettings = nil
         let job = JobRunner(assets: library.selectedAssets, settings: settings)
         runner = job
-        Task { await job.run() }
+        job.start()
     }
 
     // MARK: - 一覧

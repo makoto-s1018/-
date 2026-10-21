@@ -36,6 +36,13 @@ final class JobRunner: Identifiable {
     private(set) var currentFilename = ""
     /// 処理中の1本（動画）の進み具合 0〜1
     private(set) var currentProgress: Double = 0
+    /// 写真の処理をアプリの外でも続けられる状態か
+    private(set) var backgroundMode: BackgroundWork.Mode = .none
+    /// 動画の処理中にアプリを離れたため中断した
+    private(set) var wasInterrupted = false
+
+    @ObservationIgnored private let background = BackgroundWork()
+    @ObservationIgnored private var runTask: Task<Void, Never>?
 
     /// 削除する元写真（保存に成功したものだけが対象）
     var deleteSelection: Set<String> = []
@@ -54,17 +61,59 @@ final class JobRunner: Identifiable {
     var savedOriginalBytes: Int { savedResults.reduce(0) { $0 + $1.originalBytes } }
     var savedNewBytes: Int { savedResults.reduce(0) { $0 + $1.newBytes } }
 
+    private var isVideo: Bool { settings.mode == .video }
+    private var unit: String { isVideo ? "本" : "枚" }
+
+    /// 今の1件が終わったところで止める
     func cancel() { isCancelled = true }
 
-    func run() async {
+    func start() {
+        guard runTask == nil else { return }
+        runTask = Task { await run() }
+    }
+
+    /// アプリがバックグラウンドに移ったときに呼ぶ
+    /// 動画は途中で止められると書き出しが失敗するので、ここで安全に中断する（元の動画には手を付けない）
+    func appDidEnterBackground() {
+        guard isVideo, isRunning, !isCancelled else { return }
+        wasInterrupted = true
+        isCancelled = true
+        runTask?.cancel()
+    }
+
+    private func run() async {
         isRunning = true
         defer { isRunning = false; currentFilename = "" }
 
-        for asset in assets {
-            if isCancelled { break }
-            results.append(await process(asset))
+        // 写真はアプリを離れても続ける。動画はアプリを開いたまま処理する
+        if !isVideo {
+            background.begin(
+                title: settings.mode == .compress ? "写真を圧縮中" : "写真を変換中",
+                subtitle: "0 / \(total) \(unit)",
+                total: total
+            ) { [weak self] in
+                // 画面上部から中止された、または iOS に止められた
+                self?.isCancelled = true
+            }
+            backgroundMode = background.mode
         }
-        // 保存できた写真は、最初は削除対象として選択しておく（実行するかはユーザーが決める）
+
+        for asset in assets {
+            if isCancelled || Task.isCancelled { break }
+            results.append(await process(asset))
+            if !isVideo {
+                background.update(done: results.count, subtitle: "\(results.count) / \(total) \(unit)")
+            }
+        }
+
+        if !isVideo {
+            background.end(success: !isCancelled)
+            backgroundMode = .none
+        }
+        if wasInterrupted {
+            message = "アプリを離れたため、動画の圧縮を中断しました。処理中だった動画は保存していません（元の動画はそのままです）。"
+        }
+        // 保存できたものは、最初は削除対象として選択しておく（実行するかはユーザーが決める）
         deleteSelection = Set(savedResults.map(\.id))
     }
 
@@ -137,9 +186,12 @@ final class JobRunner: Identifiable {
             return JobResult(id: id, filename: newName, originalBytes: originalBytes, newBytes: newBytes,
                              status: .saved)
         } catch {
+            let reason = wasInterrupted || error is CancellationError
+                ? "アプリを離れたため中断しました（元の動画はそのままです）"
+                : error.localizedDescription
             return JobResult(id: id, filename: filename.isEmpty ? "（不明）" : filename,
                              originalBytes: originalBytes, newBytes: 0,
-                             status: .failed(error.localizedDescription))
+                             status: .failed(reason))
         }
     }
 

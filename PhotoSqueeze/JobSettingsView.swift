@@ -49,6 +49,22 @@ struct JobSettingsView: View {
                 }
 
                 Section {
+                    if mode == .video {
+                        Label {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("動画の圧縮中はバックグラウンド処理はできません。")
+                                    .bold()
+                                Text("終わるまでアプリを開いたままにしてください。ほかのアプリに切り替えたり画面をロックしたりすると、その時点で中断します（元の動画はそのまま残ります）。")
+                            }
+                        } icon: {
+                            Image(systemName: "exclamationmark.triangle.fill")
+                                .foregroundStyle(.orange)
+                        }
+                        .font(.footnote)
+                    } else {
+                        Label("処理中にほかのアプリに切り替えても、バックグラウンドで処理を続けます（iOS 26以降。それより前は約30秒）。", systemImage: "arrow.triangle.branch")
+                            .font(.footnote)
+                    }
                     Label("元の\(noun)はそのまま残ります。処理が終わったあとに、元の\(noun)を削除するかどうかを選べます。", systemImage: "info.circle")
                         .font(.footnote)
                     Label("撮影日・位置情報は元の\(noun)から引き継ぎます。", systemImage: "calendar")

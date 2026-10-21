@@ -9,6 +9,17 @@ struct ResultView: View {
     private var noun: String { isVideo ? "動画" : "写真" }
     private var unit: String { isVideo ? "本" : "枚" }
 
+    private var backgroundNote: String {
+        switch runner.backgroundMode {
+        case .continued:
+            "ほかのアプリに切り替えても処理は続きます。進み具合は画面上部にも表示されます。"
+        case .shortExtension:
+            "ほかのアプリに切り替えると約30秒で一時停止し、アプリに戻ると続きから再開します。"
+        case .none:
+            "処理中はアプリを閉じないでください。"
+        }
+    }
+
     var body: some View {
         NavigationStack {
             List {
@@ -68,11 +79,19 @@ struct ResultView: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
-                Text(isVideo
-                     ? "処理中はアプリを開いたままにしてください（ほかのアプリに切り替えると失敗します）。動画は1本あたり数十秒〜数分かかります。"
-                     : "処理中はアプリを閉じないでください。iCloud上の写真はダウンロードに時間がかかることがあります。")
+                if isVideo {
+                    Label {
+                        Text("動画の圧縮中はバックグラウンド処理はできません。終わるまでアプリを開いたままにしてください。ほかのアプリに切り替えたり画面をロックしたりすると中断します（元の動画はそのまま残ります）。")
+                    } icon: {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .foregroundStyle(.orange)
+                    }
                     .font(.caption)
-                    .foregroundStyle(.secondary)
+                } else {
+                    Label(backgroundNote, systemImage: "arrow.triangle.branch")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             }
             .padding(.vertical, 4)
         }

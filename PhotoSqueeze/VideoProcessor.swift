@@ -171,6 +171,7 @@ enum VideoProcessor {
             }
         }
 
+        try Task.checkCancellation()
         guard reader.startReading() else { throw reader.error ?? ProcessingError.decodeFailed }
         guard writer.startWriting() else {
             reader.cancelReading()
@@ -178,20 +179,30 @@ enum VideoProcessor {
         }
         writer.startSession(atSourceTime: .zero)
 
-        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-            let group = DispatchGroup()
-            for pump in pumps {
-                group.enter()
-                pump.start(reader: reader, writer: writer, duration: duration,
-                           progress: pump.isVideo ? progress : nil) {
-                    group.leave()
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                let group = DispatchGroup()
+                for pump in pumps {
+                    group.enter()
+                    pump.start(reader: reader, writer: writer, duration: duration,
+                               progress: pump.isVideo ? progress : nil) {
+                        group.leave()
+                    }
+                }
+                group.notify(queue: .global(qos: .userInitiated)) {
+                    continuation.resume()
                 }
             }
-            group.notify(queue: .global(qos: .userInitiated)) {
-                continuation.resume()
-            }
+        } onCancel: {
+            // 中断された（アプリを離れた）。読み出しを止めると、流し込みもすぐに終わる
+            reader.cancelReading()
         }
 
+        // 中断された場合は書きかけのファイルを捨てる（保存はしない）
+        if Task.isCancelled {
+            writer.cancelWriting()
+            throw CancellationError()
+        }
         if reader.status == .failed || writer.status == .failed {
             let error = reader.error ?? writer.error ?? ProcessingError.encodeFailed
             reader.cancelReading()
