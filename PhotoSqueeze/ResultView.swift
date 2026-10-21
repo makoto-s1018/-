@@ -26,6 +26,7 @@ struct ResultView: View {
                 if runner.isRunning {
                     progressSection
                 } else {
+                    if runner.remainingCount > 0 { resumeSection }
                     summarySection
                     if !runner.savedResults.isEmpty { deleteSection }
                 }
@@ -97,6 +98,28 @@ struct ResultView: View {
         }
     }
 
+    // MARK: - 続きから再開
+
+    private var resumeSection: some View {
+        Section {
+            Button {
+                runner.resume()
+            } label: {
+                Label("続きから再開（残り \(runner.remainingCount) \(unit)）", systemImage: "play.fill")
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.large)
+            .listRowBackground(Color.clear)
+        } header: {
+            Text("途中で止まっています")
+        } footer: {
+            Text(isVideo
+                 ? "中断した動画は、最初からやり直します。「閉じる」を押しても、あとで一覧画面から続きを再開できます。"
+                 : "「閉じる」を押しても、あとで一覧画面から続きを再開できます。")
+        }
+    }
+
     // MARK: - 集計
 
     private var summarySection: some View {
@@ -111,8 +134,8 @@ struct ResultView: View {
             LabeledContent("保存した\(noun)", value: "\(saved)\(unit)")
             if skipped > 0 { LabeledContent("スキップ", value: "\(skipped)\(unit)") }
             if failed > 0 { LabeledContent("失敗", value: "\(failed)\(unit)") }
-            if runner.isCancelled {
-                LabeledContent("中止", value: "\(runner.total - runner.results.count)\(unit)は未処理")
+            if runner.remainingCount > 0 {
+                LabeledContent("未処理", value: "\(runner.remainingCount)\(unit)")
             }
             if saved > 0 {
                 LabeledContent("サイズ", value: "\(before.byteString) → \(after.byteString)")

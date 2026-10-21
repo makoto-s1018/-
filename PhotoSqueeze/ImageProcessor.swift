@@ -2,7 +2,7 @@ import ImageIO
 import Photos
 import UniformTypeIdentifiers
 
-enum JobMode: String, Identifiable {
+enum JobMode: String, Codable, Identifiable {
     case compress
     case convert
     case video
@@ -21,7 +21,7 @@ enum JobMode: String, Identifiable {
     var shrinks: Bool { self != .convert }
 }
 
-enum OutputFormat: String, CaseIterable, Identifiable {
+enum OutputFormat: String, Codable, CaseIterable, Identifiable {
     case jpeg = "JPEG"
     case heic = "HEIC"
     case png = "PNG"
@@ -47,7 +47,7 @@ enum OutputFormat: String, CaseIterable, Identifiable {
     var isLossy: Bool { self != .png }
 }
 
-struct JobSettings {
+struct JobSettings: Codable {
     var mode: JobMode
     var format: OutputFormat
     /// 0.0〜1.0（JPEG / HEIC のみ）

@@ -1,8 +1,8 @@
 import Photos
 import SwiftUI
 
-struct JobResult: Identifiable {
-    enum Status {
+struct JobResult: Identifiable, Codable {
+    enum Status: Codable {
         case saved
         case skipped(String)
         case failed(String)
@@ -21,16 +21,52 @@ struct JobResult: Identifiable {
     }
 }
 
-/// 選択した写真を1枚ずつ処理し、結果と削除対象を管理する
+/// 途中で止まった処理（アプリを閉じても残るように保存する）
+struct PendingJob: Codable {
+    var settings: JobSettings
+    /// まだ処理していない写真・動画（localIdentifier、処理する順）
+    var remainingIDs: [String]
+    /// ここまでの結果
+    var results: [JobResult]
+    var deletedIDs: [String]
+    var total: Int
+    var savedAt: Date
+
+    var isVideo: Bool { settings.mode == .video }
+    var unit: String { isVideo ? "本" : "枚" }
+}
+
+/// 途中経過の保存先（この iPhone の中だけに保存される）
+enum PendingJobStore {
+    private static let key = "PhotoSqueeze.pendingJob"
+
+    static func load() -> PendingJob? {
+        guard let data = UserDefaults.standard.data(forKey: key) else { return nil }
+        return try? JSONDecoder().decode(PendingJob.self, from: data)
+    }
+
+    static func save(_ job: PendingJob) {
+        guard let data = try? JSONEncoder().encode(job) else { return }
+        UserDefaults.standard.set(data, forKey: key)
+    }
+
+    static func clear() {
+        UserDefaults.standard.removeObject(forKey: key)
+    }
+}
+
+/// 選択した写真・動画を1件ずつ処理し、結果と削除対象を管理する
+/// 1件終わるごとに途中経過を保存するので、中断しても続きから再開できる
 @MainActor
 @Observable
 final class JobRunner: Identifiable {
     let id = UUID()
     let settings: JobSettings
     let total: Int
-    private let assets: [PHAsset]
+    /// まだ処理していないもの（先頭から順に処理する）
+    private var pending: [PHAsset]
 
-    private(set) var results: [JobResult] = []
+    private(set) var results: [JobResult]
     private(set) var isRunning = false
     private(set) var isCancelled = false
     private(set) var currentFilename = ""
@@ -47,29 +83,54 @@ final class JobRunner: Identifiable {
     /// 削除する元写真（保存に成功したものだけが対象）
     var deleteSelection: Set<String> = []
     private(set) var isDeleting = false
-    private(set) var deletedIDs: Set<String> = []
+    private(set) var deletedIDs: Set<String>
     var message: String?
 
     init(assets: [PHAsset], settings: JobSettings) {
-        self.assets = assets
+        self.pending = assets
         self.settings = settings
         self.total = assets.count
+        self.results = []
+        self.deletedIDs = []
+    }
+
+    /// 保存しておいた途中経過から再開する
+    init(resuming job: PendingJob, assets: [PHAsset]) {
+        self.pending = assets
+        self.settings = job.settings
+        self.total = job.total
+        self.results = job.results
+        self.deletedIDs = Set(job.deletedIDs)
+        self.deleteSelection = Set(job.results.filter(\.isSaved).map(\.id)).subtracting(job.deletedIDs)
     }
 
     var savedResults: [JobResult] { results.filter(\.isSaved) }
     var deletableResults: [JobResult] { savedResults.filter { !deletedIDs.contains($0.id) } }
     var savedOriginalBytes: Int { savedResults.reduce(0) { $0 + $1.originalBytes } }
     var savedNewBytes: Int { savedResults.reduce(0) { $0 + $1.newBytes } }
+    /// 残りの件数（中断・中止したときに続きから再開できる分）
+    var remainingCount: Int { pending.count }
 
     private var isVideo: Bool { settings.mode == .video }
     private var unit: String { isVideo ? "本" : "枚" }
 
-    /// 今の1件が終わったところで止める
+    /// 今の1件が終わったところで止める（残りは続きから再開できる）
     func cancel() { isCancelled = true }
 
     func start() {
-        guard runTask == nil else { return }
+        guard !isRunning, !pending.isEmpty else { return }
+        isCancelled = false
+        wasInterrupted = false
         runTask = Task { await run() }
+    }
+
+    /// 中断・中止したところから続きを再開する
+    func resume() { start() }
+
+    /// 残りを処理せずに終える（途中経過の保存も消す）
+    func discardRemaining() {
+        pending = []
+        PendingJobStore.clear()
     }
 
     /// アプリがバックグラウンドに移ったときに呼ぶ
@@ -83,41 +144,66 @@ final class JobRunner: Identifiable {
 
     private func run() async {
         isRunning = true
-        defer { isRunning = false; currentFilename = "" }
+        defer {
+            isRunning = false
+            currentFilename = ""
+            runTask = nil
+        }
+        persist()
 
         // 写真はアプリを離れても続ける。動画はアプリを開いたまま処理する
         if !isVideo {
             background.begin(
                 title: settings.mode == .compress ? "写真を圧縮中" : "写真を変換中",
-                subtitle: "0 / \(total) \(unit)",
+                subtitle: "\(results.count) / \(total) \(unit)",
                 total: total
             ) { [weak self] in
                 // 画面上部から中止された、または iOS に止められた
                 self?.isCancelled = true
             }
+            background.update(done: results.count, subtitle: "\(results.count) / \(total) \(unit)")
             backgroundMode = background.mode
         }
 
-        for asset in assets {
+        while let asset = pending.first {
             if isCancelled || Task.isCancelled { break }
-            results.append(await process(asset))
+            // nil は「アプリを離れたため中断」。その1件は残りに戻して、次回やり直す
+            guard let result = await process(asset) else { break }
+            results.append(result)
+            pending.removeFirst()
+            if result.isSaved { deleteSelection.insert(result.id) }
+            persist()
             if !isVideo {
                 background.update(done: results.count, subtitle: "\(results.count) / \(total) \(unit)")
             }
         }
 
         if !isVideo {
-            background.end(success: !isCancelled)
+            background.end(success: pending.isEmpty)
             backgroundMode = .none
         }
         if wasInterrupted {
-            message = "アプリを離れたため、動画の圧縮を中断しました。処理中だった動画は保存していません（元の動画はそのままです）。"
+            message = "アプリを離れたため、動画の圧縮を中断しました（元の動画はそのままです）。「続きから再開」で、中断した動画からやり直せます。"
         }
-        // 保存できたものは、最初は削除対象として選択しておく（実行するかはユーザーが決める）
-        deleteSelection = Set(savedResults.map(\.id))
     }
 
-    private func process(_ asset: PHAsset) async -> JobResult {
+    /// 途中経過を保存する。すべて終わったら消す
+    private func persist() {
+        guard !pending.isEmpty else {
+            PendingJobStore.clear()
+            return
+        }
+        PendingJobStore.save(PendingJob(
+            settings: settings,
+            remainingIDs: pending.map(\.localIdentifier),
+            results: results,
+            deletedIDs: Array(deletedIDs),
+            total: total,
+            savedAt: Date()
+        ))
+    }
+
+    private func process(_ asset: PHAsset) async -> JobResult? {
         if settings.mode == .video { return await processVideo(asset) }
         let id = asset.localIdentifier
         var filename = ""
@@ -155,7 +241,8 @@ final class JobRunner: Identifiable {
         }
     }
 
-    private func processVideo(_ asset: PHAsset) async -> JobResult {
+    /// 動画を1本処理する。アプリを離れて中断した場合は nil（何も保存していない）
+    private func processVideo(_ asset: PHAsset) async -> JobResult? {
         let id = asset.localIdentifier
         var filename = ""
         var originalBytes = 0
@@ -174,6 +261,7 @@ final class JobRunner: Identifiable {
             try await VideoProcessor.compress(source.avAsset, to: tempURL, preset: settings.videoPreset) { value in
                 Task { @MainActor [weak self] in self?.currentProgress = value }
             }
+            if wasInterrupted || Task.isCancelled { return nil }
 
             let newBytes = (try? tempURL.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
             if originalBytes > 0, newBytes >= originalBytes {
@@ -186,12 +274,10 @@ final class JobRunner: Identifiable {
             return JobResult(id: id, filename: newName, originalBytes: originalBytes, newBytes: newBytes,
                              status: .saved)
         } catch {
-            let reason = wasInterrupted || error is CancellationError
-                ? "アプリを離れたため中断しました（元の動画はそのままです）"
-                : error.localizedDescription
+            if wasInterrupted || error is CancellationError { return nil }
             return JobResult(id: id, filename: filename.isEmpty ? "（不明）" : filename,
                              originalBytes: originalBytes, newBytes: 0,
-                             status: .failed(reason))
+                             status: .failed(error.localizedDescription))
         }
     }
 
@@ -208,7 +294,8 @@ final class JobRunner: Identifiable {
             try await ImageProcessor.delete(identifiers: ids)
             deletedIDs.formUnion(ids)
             deleteSelection.subtract(ids)
-            message = "元の写真を\(ids.count)枚削除しました。「最近削除した項目」から30日以内なら復元できます。"
+            persist()
+            message = "元の\(isVideo ? "動画" : "写真")を\(ids.count)\(unit)削除しました。「最近削除した項目」から30日以内なら復元できます。"
         } catch {
             // iOS の確認ダイアログでキャンセルした場合もここに来る
             let nsError = error as NSError

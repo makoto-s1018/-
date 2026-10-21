@@ -9,6 +9,8 @@ struct ContentView: View {
     @State private var runner: JobRunner?
     @State private var pendingSettings: JobSettings?
     @State private var showsDuplicates = false
+    /// 前回途中で止まった処理
+    @State private var pendingJob: PendingJob?
 
     var body: some View {
         NavigationStack {
@@ -25,9 +27,15 @@ struct ContentView: View {
                 if library.hasAccess { bottomBar }
             }
         }
-        .task { library.load() }
+        .task {
+            library.load()
+            refreshPendingJob()
+        }
         .onChange(of: scenePhase) { _, phase in
-            if phase == .active { library.load() }
+            if phase == .active {
+                library.load()
+                refreshPendingJob()
+            }
             if phase == .background { runner?.appDidEnterBackground() }
         }
         .sheet(item: $settingsMode, onDismiss: startPendingJob) { mode in
@@ -45,6 +53,7 @@ struct ContentView: View {
                 runner = nil
                 library.clearSelection()
                 library.load()
+                refreshPendingJob()
             }
         }
         .fullScreenCover(isPresented: $showsDuplicates) {
@@ -53,6 +62,32 @@ struct ContentView: View {
                 library.load()
             }
         }
+    }
+
+    private func refreshPendingJob() {
+        pendingJob = runner == nil ? PendingJobStore.load() : nil
+    }
+
+    /// 前回途中で止まった処理を、続きから再開する
+    private func resumePendingJob(_ job: PendingJob) {
+        let fetched = PHAsset.fetchAssets(withLocalIdentifiers: job.remainingIDs, options: nil)
+        var byID: [String: PHAsset] = [:]
+        fetched.enumerateObjects { asset, _, _ in byID[asset.localIdentifier] = asset }
+        // 削除済みなどで見つからないものは飛ばし、元の順番で並べる
+        let assets = job.remainingIDs.compactMap { byID[$0] }
+        pendingJob = nil
+        guard !assets.isEmpty else {
+            PendingJobStore.clear()
+            return
+        }
+        let resumed = JobRunner(resuming: job, assets: assets)
+        runner = resumed
+        resumed.start()
+    }
+
+    private func discardPendingJob() {
+        PendingJobStore.clear()
+        pendingJob = nil
     }
 
     /// 設定シートが閉じきってから処理画面を出す（同時に出すと表示に失敗するため）
@@ -69,6 +104,16 @@ struct ContentView: View {
     private var photoList: some View {
         @Bindable var library = library
         return ScrollView {
+            if let pendingJob {
+                PendingJobBanner(
+                    job: pendingJob,
+                    onResume: { resumePendingJob(pendingJob) },
+                    onDiscard: { discardPendingJob() }
+                )
+                .padding(.horizontal)
+                .padding(.bottom, 8)
+            }
+
             Picker("種類", selection: $library.mediaKind) {
                 ForEach(MediaKind.allCases) { kind in
                     Label(kind.rawValue, systemImage: kind == .photo ? "photo" : "video").tag(kind)
@@ -173,6 +218,47 @@ struct ContentView: View {
         .padding(.top, 10)
         .padding(.bottom, 6)
         .background(.bar)
+    }
+}
+
+// MARK: - 途中で止まった処理のお知らせ
+
+private struct PendingJobBanner: View {
+    let job: PendingJob
+    let onResume: () -> Void
+    let onDiscard: () -> Void
+    @State private var confirmsDiscard = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Label("前回の「\(job.settings.mode.title)」が途中で止まっています", systemImage: "pause.circle.fill")
+                .font(.subheadline.bold())
+            Text("\(job.results.count) / \(job.total) \(job.unit)完了・残り \(job.remainingIDs.count) \(job.unit)（\(job.savedAt.formatted(date: .abbreviated, time: .shortened))）")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            HStack {
+                Button {
+                    onResume()
+                } label: {
+                    Label("続きから再開", systemImage: "play.fill")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+
+                Button("やめる", role: .destructive) {
+                    confirmsDiscard = true
+                }
+                .buttonStyle(.bordered)
+            }
+            .controlSize(.regular)
+        }
+        .padding(12)
+        .background(Color.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: 12))
+        .confirmationDialog("残りの処理をやめますか？", isPresented: $confirmsDiscard, titleVisibility: .visible) {
+            Button("残りをやめる", role: .destructive) { onDiscard() }
+        } message: {
+            Text("ここまでに保存した\(job.isVideo ? "動画" : "写真")はそのまま残ります。")
+        }
     }
 }
 

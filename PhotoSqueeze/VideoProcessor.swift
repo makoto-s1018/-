@@ -3,7 +3,7 @@ import Photos
 import VideoToolbox
 
 /// 動画の圧縮プリセット（映像は HEVC で再エンコード、音声はそのまま）
-enum VideoPreset: String, CaseIterable, Identifiable {
+enum VideoPreset: String, Codable, CaseIterable, Identifiable {
     case high
     case medium
     case light
