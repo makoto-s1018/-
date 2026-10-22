@@ -57,7 +57,8 @@ struct ContentView: View {
             JobSettingsView(
                 mode: mode,
                 count: selectionCount,
-                videoDuration: isFiles ? 0 : library.selectedAssets.reduce(0) { $0 + $1.duration }
+                videoDuration: isFiles ? 0 : library.selectedAssets.reduce(0) { $0 + $1.duration },
+                isFiles: isFiles
             ) { settings in
                 pendingSettings = settings
                 settingsMode = nil

@@ -6,6 +6,8 @@ struct JobSettingsView: View {
     let count: Int
     /// 選択中の動画の合計時間（秒）
     let videoDuration: TimeInterval
+    /// 「ファイル」アプリのファイルを処理するか
+    let isFiles: Bool
     let onStart: (JobSettings) -> Void
 
     @Environment(\.dismiss) private var dismiss
@@ -13,14 +15,19 @@ struct JobSettingsView: View {
     @State private var quality: Double
     @State private var maxDimension: Int
     @State private var videoPreset: VideoPreset = .medium
+    @State private var fileDeletion: FileDeletion = .afterReview
+    /// 「1件ずつすぐ完全に削除」で始める前の確認
+    @State private var confirmsStart = false
 
     /// 0 は「元のサイズ」
     private let dimensionChoices = [0, 4032, 3024, 2048, 1600, 1280, 1024]
 
-    init(mode: JobMode, count: Int, videoDuration: TimeInterval = 0, onStart: @escaping (JobSettings) -> Void) {
+    init(mode: JobMode, count: Int, videoDuration: TimeInterval = 0, isFiles: Bool = false,
+         onStart: @escaping (JobSettings) -> Void) {
         self.mode = mode
         self.count = count
         self.videoDuration = videoDuration
+        self.isFiles = isFiles
         self.onStart = onStart
         _format = State(initialValue: .jpeg)
         let preset = CompressionPreset.medium
@@ -48,6 +55,10 @@ struct JobSettingsView: View {
                     imageSections
                 }
 
+                if isFiles {
+                    deletionSection
+                }
+
                 Section {
                     if mode == .video {
                         Label {
@@ -65,7 +76,11 @@ struct JobSettingsView: View {
                         Label("処理中にほかのアプリに切り替えても、バックグラウンドで処理を続けます（iOS 26以降。それより前は約30秒）。", systemImage: "arrow.triangle.branch")
                             .font(.footnote)
                     }
-                    Label("元の\(noun)はそのまま残ります。処理が終わったあとに、元の\(noun)を削除するかどうかを選べます。", systemImage: "info.circle")
+                    if !isFiles {
+                        Label("元の\(noun)はそのまま残ります。処理が終わったあとに、元の\(noun)を削除するかどうかを選べます。", systemImage: "info.circle")
+                            .font(.footnote)
+                    }
+                    Label("iPhoneの空き容量が少なくなったら自動で一時停止します。容量を空けてから「続きから再開」できます。", systemImage: "internaldrive")
                         .font(.footnote)
                     Label("撮影日・位置情報は元の\(noun)から引き継ぎます。", systemImage: "calendar")
                         .font(.footnote)
@@ -80,13 +95,11 @@ struct JobSettingsView: View {
             }
             .safeAreaInset(edge: .bottom) {
                 Button {
-                    onStart(JobSettings(
-                        mode: mode,
-                        format: format,
-                        quality: quality,
-                        maxDimension: maxDimension == 0 ? nil : maxDimension,
-                        videoPreset: videoPreset
-                    ))
+                    if isFiles, fileDeletion == .eachPermanent {
+                        confirmsStart = true
+                    } else {
+                        start()
+                    }
                 } label: {
                     Text(startTitle)
                         .frame(maxWidth: .infinity)
@@ -98,6 +111,38 @@ struct JobSettingsView: View {
             }
         }
         .presentationDetents([.large])
+        .confirmationDialog("元のファイルを1件ずつ完全に削除します", isPresented: $confirmsStart, titleVisibility: .visible) {
+            Button("圧縮して元を完全に削除する", role: .destructive) { start() }
+        } message: {
+            Text("圧縮できたものから順に、元の\(noun)を完全に削除します。削除したものは元に戻せません（小さくならずにスキップしたものは削除しません）。")
+        }
+    }
+
+    private func start() {
+        onStart(JobSettings(
+            mode: mode,
+            format: format,
+            quality: quality,
+            maxDimension: maxDimension == 0 ? nil : maxDimension,
+            videoPreset: videoPreset,
+            fileDeletion: isFiles ? fileDeletion : .afterReview
+        ))
+    }
+
+    // MARK: - 元ファイルの削除（「ファイル」アプリ）
+
+    private var deletionSection: some View {
+        Section {
+            Picker("元のファイル", selection: $fileDeletion) {
+                ForEach(FileDeletion.allCases) { Text($0.title).tag($0) }
+            }
+            .pickerStyle(.inline)
+            .labelsHidden()
+        } header: {
+            Text("元のファイルの削除")
+        } footer: {
+            Text(fileDeletion.note)
+        }
     }
 
     private var noun: String { mode == .video ? "動画" : "写真" }

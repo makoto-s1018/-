@@ -48,11 +48,14 @@ struct ResultView: View {
                 Text("保存場所にゴミ箱（最近削除した項目）がないため、\(runner.needsPermanentDelete.count)\(unit)は移せませんでした。完全に削除すると元に戻せません。")
             }
             .confirmationDialog("元の\(noun)を削除しますか？", isPresented: $confirmsFileDelete, titleVisibility: .visible) {
-                Button("削除する", role: .destructive) {
+                Button("「最近削除した項目」に移す", role: .destructive) {
                     Task { await runner.deleteOriginals() }
                 }
+                Button("完全に削除（元に戻せません）", role: .destructive) {
+                    Task { await runner.deleteOriginals(permanently: true) }
+                }
             } message: {
-                Text("「ファイル」アプリの「最近削除した項目」に移します（iCloud Drive・このiPhone内なら30日間は復元できます）。")
+                Text("「最近削除した項目」に移すと、30日間は「ファイル」アプリから復元できます。完全に削除すると、すぐに容量が空きますが元に戻せません。")
             }
             .navigationTitle(runner.isRunning ? "処理中…" : "完了")
             .navigationBarTitleDisplayMode(.inline)

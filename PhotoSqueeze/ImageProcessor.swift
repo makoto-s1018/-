@@ -56,6 +56,38 @@ struct JobSettings: Codable {
     var maxDimension: Int?
     /// 動画の圧縮設定（mode が .video のときに使う）
     var videoPreset: VideoPreset = .medium
+    /// 「ファイル」アプリの元ファイルをいつ削除するか
+    var fileDeletion: FileDeletion = .afterReview
+}
+
+/// 「ファイル」アプリの元ファイルの削除のしかた
+enum FileDeletion: String, Codable, CaseIterable, Identifiable {
+    /// 全部終わってから結果画面で選んで削除（今まで通り）
+    case afterReview
+    /// 1件保存できるたびに、元をすぐ完全に削除（容量がすぐ空く）
+    case eachPermanent
+    /// 1件保存できるたびに、元を「最近削除した項目」へ移す
+    case eachTrash
+
+    var id: Self { self }
+
+    var title: String {
+        switch self {
+        case .afterReview: "終わってから選んで削除"
+        case .eachPermanent: "1件ずつすぐ完全に削除"
+        case .eachTrash: "1件ずつ「最近削除した項目」へ"
+        }
+    }
+
+    var note: String {
+        switch self {
+        case .afterReview: "全部終わったあと、結果画面で削除するものを選べます。処理中は元と新しいファイルの両方の容量が必要です。"
+        case .eachPermanent: "圧縮できたらすぐ元を削除するので、空き容量が少なくても進められます。削除した元のファイルは元に戻せません。"
+        case .eachTrash: "圧縮できたらすぐ元を「最近削除した項目」へ移します。30日間は復元できますが、その間は容量が空きません。"
+        }
+    }
+
+    var deletesEachItem: Bool { self != .afterReview }
 }
 
 enum ProcessingError: LocalizedError {

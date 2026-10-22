@@ -69,23 +69,43 @@ enum FileProcessor {
         try? FileManager.default.setAttributes(dates, ofItemAtPath: url.path)
     }
 
-    /// 「最近削除した項目」へ移す。移せなかったファイルを返す（保存場所によってはゴミ箱がない）
-    static func moveToTrash(_ urls: [URL]) -> [URL] {
+    /// 削除の結果
+    struct DeleteOutcome: Sendable {
+        /// 削除できた（またはすでに無かった）ファイル
+        var done: [URL] = []
+        /// 削除できなかったファイル
         var failed: [URL] = []
-        for url in urls {
-            do {
-                try FileManager.default.trashItem(at: url, resultingItemURL: nil)
-            } catch {
-                if FileManager.default.fileExists(atPath: url.path) { failed.append(url) }
-            }
-        }
-        return failed
+        /// 最後に起きたエラーの説明（原因の確認用）
+        var lastError: String?
     }
 
-    /// 完全に削除する（元に戻せない）。削除できたファイルを返す
-    static func deletePermanently(_ urls: [URL]) -> [URL] {
-        urls.filter { url in
-            (try? FileManager.default.removeItem(at: url)) != nil || !FileManager.default.fileExists(atPath: url.path)
+    /// 「最近削除した項目」へ移す（保存場所によってはゴミ箱がなく、移せないことがある）
+    static func moveToTrash(_ urls: [URL]) -> DeleteOutcome {
+        delete(urls) { try FileManager.default.trashItem(at: $0, resultingItemURL: nil) }
+    }
+
+    /// 完全に削除する（元に戻せない）
+    static func deletePermanently(_ urls: [URL]) -> DeleteOutcome {
+        delete(urls) { try FileManager.default.removeItem(at: $0) }
+    }
+
+    /// iCloud Drive などの「ファイル」アプリの保存場所では、ほかのアプリ（ファイルアプリ本体など）と
+    /// 取り合いにならないよう、削除も NSFileCoordinator を通して行う必要がある
+    private static func delete(_ urls: [URL], using operation: (URL) throws -> Void) -> DeleteOutcome {
+        var outcome = DeleteOutcome()
+        for url in urls {
+            var coordinationError: NSError?
+            var operationError: Error?
+            NSFileCoordinator().coordinate(writingItemAt: url, options: .forDeleting, error: &coordinationError) { target in
+                do { try operation(target) } catch { operationError = error }
+            }
+            if !FileManager.default.fileExists(atPath: url.path) {
+                outcome.done.append(url)
+            } else {
+                outcome.failed.append(url)
+                outcome.lastError = (operationError ?? coordinationError)?.localizedDescription ?? "原因不明"
+            }
         }
+        return outcome
     }
 }

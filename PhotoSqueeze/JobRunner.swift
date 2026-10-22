@@ -192,8 +192,18 @@ final class JobRunner: Identifiable {
             backgroundMode = background.mode
         }
 
+        var notes: [String] = []
+        var eachDeleteFailures = 0
+        var lastDeleteError: String?
+
         while let item = pending.first {
             if isCancelled || Task.isCancelled { break }
+            // 空き容量が少ないまま続けると、保存に失敗したりアプリが落ちたりするので一時停止する
+            if let free = Self.freeSpace(), free < minimumFreeSpace {
+                let freeText = Int(free).byteString
+                notes.append("iPhoneの空き容量が少なくなったため一時停止しました（残り \(freeText)）。元の\(noun)を削除して「最近削除した項目」を空にするなど容量を空けてから、「続きから再開」してください。")
+                break
+            }
             // nil は「アプリを離れたため中断」。その1件は残りに戻して、次回やり直す
             let processed: JobResult?
             if isVideo {
@@ -204,7 +214,17 @@ final class JobRunner: Identifiable {
             guard let result = processed else { break }
             results.append(result)
             pending.removeFirst()
-            if result.isSaved { deleteSelection.insert(result.id) }
+            if result.isSaved {
+                if isFiles, settings.fileDeletion.deletesEachItem {
+                    // 1件ずつ削除：保存できたらすぐ元を削除して容量を空ける
+                    if let error = await deleteOriginalNow(result.id) {
+                        eachDeleteFailures += 1
+                        lastDeleteError = error
+                    }
+                } else {
+                    deleteSelection.insert(result.id)
+                }
+            }
             persist()
             if !isVideo {
                 background.update(done: results.count, subtitle: "\(results.count) / \(total) \(unit)")
@@ -216,8 +236,39 @@ final class JobRunner: Identifiable {
             backgroundMode = .none
         }
         if wasInterrupted {
-            message = "アプリを離れたため、動画の圧縮を中断しました（元の動画はそのままです）。「続きから再開」で、中断した動画からやり直せます。"
+            notes.append("アプリを離れたため、動画の圧縮を中断しました（元の動画はそのままです）。「続きから再開」で、中断した動画からやり直せます。")
         }
+        if eachDeleteFailures > 0 {
+            notes.append("\(eachDeleteFailures)\(unit)は元のファイルを削除できませんでした（理由：\(lastDeleteError ?? "原因不明")）。結果画面の「元の\(noun)を削除」から、もう一度試せます。")
+        }
+        if !notes.isEmpty {
+            message = notes.joined(separator: "\n\n")
+        }
+    }
+
+    /// 処理を続けるのに必要な空き容量（動画は一時ファイルと保存先の両方が要るので多め）
+    private var minimumFreeSpace: Int64 { isVideo ? 2_000_000_000 : 500_000_000 }
+
+    private static func freeSpace() -> Int64? {
+        let home = URL(fileURLWithPath: NSHomeDirectory())
+        return try? home.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey])
+            .volumeAvailableCapacityForImportantUsage
+    }
+
+    /// 「1件ずつ削除」で、保存できた直後に元のファイルを削除する。失敗したらその理由を返す
+    private func deleteOriginalNow(_ id: String) async -> String? {
+        let url = URL(fileURLWithPath: id)
+        let permanently = settings.fileDeletion == .eachPermanent
+        let outcome = await Task.detached(priority: .userInitiated) {
+            permanently ? FileProcessor.deletePermanently([url]) : FileProcessor.moveToTrash([url])
+        }.value
+        if outcome.failed.isEmpty {
+            deletedIDs.insert(id)
+            return nil
+        }
+        // 削除できなかったものは、結果画面から削除できるように残す
+        deleteSelection.insert(id)
+        return outcome.lastError ?? "原因不明"
     }
 
     /// 途中経過を保存する。すべて終わったら消す
@@ -379,25 +430,30 @@ final class JobRunner: Identifiable {
         if deleteSelection.contains(result.id) { deleteSelection.remove(result.id) } else { deleteSelection.insert(result.id) }
     }
 
-    func deleteOriginals() async {
+    /// 元の写真・動画を削除する
+    /// - Parameter permanently: 「ファイル」アプリのとき、ゴミ箱を通さずに完全に削除する
+    func deleteOriginals(permanently: Bool = false) async {
         let ids = Array(deleteSelection.subtracting(deletedIDs))
         guard !ids.isEmpty else { return }
         isDeleting = true
         defer { isDeleting = false }
 
         if isFiles {
-            // 「ファイル」アプリ：まず「最近削除した項目」へ移す
             let urls = ids.map { URL(fileURLWithPath: $0) }
-            let failed = await Task.detached(priority: .userInitiated) {
+            if permanently {
+                await deleteFilesPermanently(urls)
+                return
+            }
+            // まず「最近削除した項目」へ移す
+            let outcome = await Task.detached(priority: .userInitiated) {
                 FileProcessor.moveToTrash(urls)
-            }.value.map(\.path)
-            let moved = Set(ids).subtracting(failed)
-            markDeleted(moved)
-            if failed.isEmpty {
-                message = "元の\(noun)を\(moved.count)\(unit)、「ファイル」アプリの「最近削除した項目」に移しました。"
+            }.value
+            markDeleted(Set(outcome.done.map(\.path)))
+            if outcome.failed.isEmpty {
+                message = "元の\(noun)を\(outcome.done.count)\(unit)、「ファイル」アプリの「最近削除した項目」に移しました。"
             } else {
-                // 保存場所にゴミ箱がない場合は、完全に削除してよいか画面で確認する
-                needsPermanentDelete = failed
+                // 保存場所にゴミ箱がない場合などは、完全に削除してよいか画面で確認する
+                needsPermanentDelete = outcome.failed.map(\.path)
             }
             return
         }
@@ -424,13 +480,19 @@ final class JobRunner: Identifiable {
         guard !urls.isEmpty else { return }
         isDeleting = true
         defer { isDeleting = false }
-        let deleted = await Task.detached(priority: .userInitiated) {
+        await deleteFilesPermanently(urls)
+    }
+
+    private func deleteFilesPermanently(_ urls: [URL]) async {
+        let outcome = await Task.detached(priority: .userInitiated) {
             FileProcessor.deletePermanently(urls)
-        }.value.map(\.path)
-        markDeleted(Set(deleted))
-        message = deleted.count == urls.count
-            ? "元の\(noun)を\(deleted.count)\(unit)削除しました。"
-            : "\(deleted.count)\(unit)削除しました。\(urls.count - deleted.count)\(unit)は削除できませんでした。"
+        }.value
+        markDeleted(Set(outcome.done.map(\.path)))
+        if outcome.failed.isEmpty {
+            message = "元の\(noun)を\(outcome.done.count)\(unit)完全に削除しました。"
+        } else {
+            message = "\(outcome.done.count)\(unit)削除しました。\(outcome.failed.count)\(unit)は削除できませんでした。\n理由：\(outcome.lastError ?? "原因不明")"
+        }
     }
 
     func cancelPermanentDelete() {
