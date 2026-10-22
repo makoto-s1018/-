@@ -279,7 +279,12 @@ private final class SamplePump: @unchecked Sendable {
         self.output = output
         self.input = input
         self.isVideo = isVideo
-        self.queue = DispatchQueue(label: "PhotoSqueeze.pump.\(isVideo ? "video" : "audio")")
+        // 1回の呼び出しごとに使い終わったメモリを解放する設定
+        self.queue = DispatchQueue(
+            label: "PhotoSqueeze.pump.\(isVideo ? "video" : "audio")",
+            qos: .userInitiated,
+            autoreleaseFrequency: .workItem
+        )
     }
 
     func start(
@@ -289,23 +294,28 @@ private final class SamplePump: @unchecked Sendable {
         progress: (@Sendable (Double) -> Void)?,
         done: @escaping @Sendable () -> Void
     ) {
-        input.requestMediaDataWhenReady(on: queue) { [self] in
-            guard !finished else { return }
-            while input.isReadyForMoreMediaData {
-                guard reader.status == .reading, writer.status == .writing,
-                      let buffer = output.copyNextSampleBuffer() else {
-                    finish(writer: writer, done: done)
-                    return
-                }
-                if let progress, duration > 0 {
-                    let fraction = CMSampleBufferGetPresentationTimeStamp(buffer).seconds / duration
-                    if fraction - lastReported >= 0.01 {
-                        lastReported = fraction
-                        progress(min(max(fraction, 0), 1))
+        // reader・writer・自分自身を強く持つと、お互いに手放せなくなり（循環参照）、
+        // 動画1本ごとに映像の変換用メモリが解放されずに溜まっていく。弱い参照で持つ
+        input.requestMediaDataWhenReady(on: queue) { [weak self, weak reader, weak writer] in
+            guard let self, let reader, let writer, !self.finished else { return }
+            while self.input.isReadyForMoreMediaData {
+                // 映像の1コマ分ずつ、使い終わったメモリをすぐ解放する
+                let keepGoing: Bool = autoreleasepool {
+                    guard reader.status == .reading, writer.status == .writing,
+                          let buffer = self.output.copyNextSampleBuffer() else {
+                        return false
                     }
+                    if let progress, duration > 0 {
+                        let fraction = CMSampleBufferGetPresentationTimeStamp(buffer).seconds / duration
+                        if fraction - self.lastReported >= 0.01 {
+                            self.lastReported = fraction
+                            progress(min(max(fraction, 0), 1))
+                        }
+                    }
+                    return self.input.append(buffer)
                 }
-                if !input.append(buffer) {
-                    finish(writer: writer, done: done)
+                if !keepGoing {
+                    self.finish(writer: writer, done: done)
                     return
                 }
             }
