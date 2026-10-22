@@ -1,5 +1,20 @@
+import AVFoundation
 import Photos
 import SwiftUI
+import UniformTypeIdentifiers
+
+/// 処理する1件（写真アプリの写真・動画、または「ファイル」アプリのファイル）
+enum JobItem {
+    case asset(PHAsset)
+    case file(URL)
+
+    var id: String {
+        switch self {
+        case .asset(let asset): asset.localIdentifier
+        case .file(let url): url.path
+        }
+    }
+}
 
 struct JobResult: Identifiable, Codable {
     enum Status: Codable {
@@ -8,7 +23,7 @@ struct JobResult: Identifiable, Codable {
         case failed(String)
     }
 
-    /// 元の写真の localIdentifier
+    /// 元の写真の localIdentifier（「ファイル」アプリの場合はファイルの場所）
     let id: String
     let filename: String
     let originalBytes: Int
@@ -24,14 +39,17 @@ struct JobResult: Identifiable, Codable {
 /// 途中で止まった処理（アプリを閉じても残るように保存する）
 struct PendingJob: Codable {
     var settings: JobSettings
-    /// まだ処理していない写真・動画（localIdentifier、処理する順）
+    /// まだ処理していないもの（写真アプリは localIdentifier、「ファイル」アプリはファイル名。処理する順）
     var remainingIDs: [String]
     /// ここまでの結果
     var results: [JobResult]
     var deletedIDs: [String]
     var total: Int
     var savedAt: Date
+    /// 「ファイル」アプリのフォルダー（写真アプリの処理では nil）
+    var folderBookmark: Data?
 
+    var isFiles: Bool { folderBookmark != nil }
     var isVideo: Bool { settings.mode == .video }
     var unit: String { isVideo ? "本" : "枚" }
 }
@@ -64,7 +82,9 @@ final class JobRunner: Identifiable {
     let settings: JobSettings
     let total: Int
     /// まだ処理していないもの（先頭から順に処理する）
-    private var pending: [PHAsset]
+    private var pending: [JobItem]
+    /// 「ファイル」アプリのフォルダー（処理中は読み書きの権利を持ち続ける）
+    @ObservationIgnored private let folder: FolderAccess?
 
     private(set) var results: [JobResult]
     private(set) var isRunning = false
@@ -84,20 +104,24 @@ final class JobRunner: Identifiable {
     var deleteSelection: Set<String> = []
     private(set) var isDeleting = false
     private(set) var deletedIDs: Set<String>
+    /// ゴミ箱に移せなかったため、完全に削除してよいか確認が必要なファイル
+    var needsPermanentDelete: [String] = []
     var message: String?
 
-    init(assets: [PHAsset], settings: JobSettings) {
-        self.pending = assets
+    init(items: [JobItem], settings: JobSettings, folder: FolderAccess? = nil) {
+        self.pending = items
         self.settings = settings
-        self.total = assets.count
+        self.folder = folder
+        self.total = items.count
         self.results = []
         self.deletedIDs = []
     }
 
     /// 保存しておいた途中経過から再開する
-    init(resuming job: PendingJob, assets: [PHAsset]) {
-        self.pending = assets
+    init(resuming job: PendingJob, items: [JobItem], folder: FolderAccess? = nil) {
+        self.pending = items
         self.settings = job.settings
+        self.folder = folder
         self.total = job.total
         self.results = job.results
         self.deletedIDs = Set(job.deletedIDs)
@@ -110,9 +134,12 @@ final class JobRunner: Identifiable {
     var savedNewBytes: Int { savedResults.reduce(0) { $0 + $1.newBytes } }
     /// 残りの件数（中断・中止したときに続きから再開できる分）
     var remainingCount: Int { pending.count }
+    /// 「ファイル」アプリのファイルを処理しているか
+    var isFiles: Bool { folder != nil }
 
     private var isVideo: Bool { settings.mode == .video }
     private var unit: String { isVideo ? "本" : "枚" }
+    private var noun: String { isVideo ? "動画" : "写真" }
 
     /// 今の1件が終わったところで止める（残りは続きから再開できる）
     func cancel() { isCancelled = true }
@@ -165,10 +192,16 @@ final class JobRunner: Identifiable {
             backgroundMode = background.mode
         }
 
-        while let asset = pending.first {
+        while let item = pending.first {
             if isCancelled || Task.isCancelled { break }
             // nil は「アプリを離れたため中断」。その1件は残りに戻して、次回やり直す
-            guard let result = await process(asset) else { break }
+            let processed: JobResult?
+            if isVideo {
+                processed = await processVideo(item)
+            } else {
+                processed = await processPhoto(item)
+            }
+            guard let result = processed else { break }
             results.append(result)
             pending.removeFirst()
             if result.isSaved { deleteSelection.insert(result.id) }
@@ -193,34 +226,54 @@ final class JobRunner: Identifiable {
             PendingJobStore.clear()
             return
         }
+        let remaining = pending.map { item -> String in
+            switch item {
+            case .asset(let asset): asset.localIdentifier
+            case .file(let url): url.lastPathComponent
+            }
+        }
         PendingJobStore.save(PendingJob(
             settings: settings,
-            remainingIDs: pending.map(\.localIdentifier),
+            remainingIDs: remaining,
             results: results,
             deletedIDs: Array(deletedIDs),
             total: total,
-            savedAt: Date()
+            savedAt: Date(),
+            folderBookmark: folder?.bookmark
         ))
     }
 
-    private func process(_ asset: PHAsset) async -> JobResult? {
-        if settings.mode == .video { return await processVideo(asset) }
-        let id = asset.localIdentifier
+    // MARK: - 写真
+
+    private func processPhoto(_ item: JobItem) async -> JobResult? {
+        let id = item.id
         var filename = ""
         var originalBytes = 0
         do {
-            let source = try await ImageProcessor.loadSource(for: asset)
-            filename = source.filename
-            originalBytes = source.data.count
+            let data: Data
+            let type: UTType?
+            switch item {
+            case .asset(let asset):
+                let source = try await ImageProcessor.loadSource(for: asset)
+                data = source.data
+                type = source.type
+                filename = source.filename
+            case .file(let url):
+                data = try await Task.detached(priority: .userInitiated) {
+                    try FileProcessor.readData(url)
+                }.value
+                type = UTType(filenameExtension: url.pathExtension)
+                filename = url.lastPathComponent
+            }
+            originalBytes = data.count
             currentFilename = filename
 
-            if settings.mode == .convert, source.type == settings.format.type {
+            if settings.mode == .convert, type == settings.format.type {
                 return JobResult(id: id, filename: filename, originalBytes: originalBytes, newBytes: 0,
                                  status: .skipped("すでに\(settings.format.rawValue)形式です"))
             }
 
             let settings = self.settings
-            let data = source.data
             let encoded = try await Task.detached(priority: .userInitiated) {
                 try ImageProcessor.encode(data, settings: settings)
             }.value
@@ -230,9 +283,24 @@ final class JobRunner: Identifiable {
                                  status: .skipped("これ以上小さくなりません"))
             }
 
-            let newName = ImageProcessor.outputFilename(for: filename, format: settings.format)
-            try await ImageProcessor.save(encoded, filename: newName, copying: asset)
-            return JobResult(id: id, filename: newName, originalBytes: originalBytes, newBytes: encoded.count,
+            let savedName: String
+            switch item {
+            case .asset(let asset):
+                savedName = ImageProcessor.outputFilename(for: filename, format: settings.format)
+                try await ImageProcessor.save(encoded, filename: savedName, copying: asset)
+            case .file(let url):
+                // 同じフォルダーに別名で保存（圧縮は「_圧縮」付き、変換は拡張子だけ変える）
+                let output = FileProcessor.outputURL(
+                    for: url,
+                    suffix: settings.mode == .compress ? "_圧縮" : "",
+                    fileExtension: settings.format.fileExtension
+                )
+                try await Task.detached(priority: .userInitiated) {
+                    try FileProcessor.write(encoded, to: output, copyingDatesFrom: url)
+                }.value
+                savedName = output.lastPathComponent
+            }
+            return JobResult(id: id, filename: savedName, originalBytes: originalBytes, newBytes: encoded.count,
                              status: .saved)
         } catch {
             return JobResult(id: id, filename: filename.isEmpty ? "（不明）" : filename,
@@ -241,9 +309,11 @@ final class JobRunner: Identifiable {
         }
     }
 
+    // MARK: - 動画
+
     /// 動画を1本処理する。アプリを離れて中断した場合は nil（何も保存していない）
-    private func processVideo(_ asset: PHAsset) async -> JobResult? {
-        let id = asset.localIdentifier
+    private func processVideo(_ item: JobItem) async -> JobResult? {
+        let id = item.id
         var filename = ""
         var originalBytes = 0
         let tempURL = FileManager.default.temporaryDirectory
@@ -252,26 +322,48 @@ final class JobRunner: Identifiable {
         defer { try? FileManager.default.removeItem(at: tempURL) }
 
         do {
-            let source = try await VideoProcessor.loadSource(for: asset)
-            filename = source.filename
-            originalBytes = source.originalBytes
+            let avAsset: AVAsset
+            switch item {
+            case .asset(let asset):
+                let source = try await VideoProcessor.loadSource(for: asset)
+                avAsset = source.avAsset
+                filename = source.filename
+                originalBytes = source.originalBytes
+            case .file(let url):
+                try await Task.detached(priority: .userInitiated) {
+                    try FileProcessor.ensureDownloaded(url)
+                }.value
+                avAsset = AVURLAsset(url: url)
+                filename = url.lastPathComponent
+                originalBytes = FileProcessor.fileSize(url)
+            }
             currentFilename = filename
             currentProgress = 0
 
-            try await VideoProcessor.compress(source.avAsset, to: tempURL, preset: settings.videoPreset) { value in
+            try await VideoProcessor.compress(avAsset, to: tempURL, preset: settings.videoPreset) { value in
                 Task { @MainActor [weak self] in self?.currentProgress = value }
             }
             if wasInterrupted || Task.isCancelled { return nil }
 
-            let newBytes = (try? tempURL.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+            let newBytes = FileProcessor.fileSize(tempURL)
             if originalBytes > 0, newBytes >= originalBytes {
                 return JobResult(id: id, filename: filename, originalBytes: originalBytes, newBytes: newBytes,
                                  status: .skipped("これ以上小さくなりません"))
             }
 
-            let newName = VideoProcessor.outputFilename(for: filename)
-            try await VideoProcessor.save(fileURL: tempURL, filename: newName, copying: asset)
-            return JobResult(id: id, filename: newName, originalBytes: originalBytes, newBytes: newBytes,
+            let savedName: String
+            switch item {
+            case .asset(let asset):
+                savedName = VideoProcessor.outputFilename(for: filename)
+                try await VideoProcessor.save(fileURL: tempURL, filename: savedName, copying: asset)
+            case .file(let url):
+                let output = FileProcessor.outputURL(for: url, suffix: "_圧縮", fileExtension: "mov")
+                try await Task.detached(priority: .userInitiated) {
+                    try FileProcessor.copy(tempURL, to: output, copyingDatesFrom: url)
+                }.value
+                savedName = output.lastPathComponent
+            }
+            return JobResult(id: id, filename: savedName, originalBytes: originalBytes, newBytes: newBytes,
                              status: .saved)
         } catch {
             if wasInterrupted || error is CancellationError { return nil }
@@ -280,6 +372,8 @@ final class JobRunner: Identifiable {
                              status: .failed(error.localizedDescription))
         }
     }
+
+    // MARK: - 元の削除
 
     func toggleDelete(_ result: JobResult) {
         if deleteSelection.contains(result.id) { deleteSelection.remove(result.id) } else { deleteSelection.insert(result.id) }
@@ -290,12 +384,28 @@ final class JobRunner: Identifiable {
         guard !ids.isEmpty else { return }
         isDeleting = true
         defer { isDeleting = false }
+
+        if isFiles {
+            // 「ファイル」アプリ：まず「最近削除した項目」へ移す
+            let urls = ids.map { URL(fileURLWithPath: $0) }
+            let failed = await Task.detached(priority: .userInitiated) {
+                FileProcessor.moveToTrash(urls)
+            }.value.map(\.path)
+            let moved = Set(ids).subtracting(failed)
+            markDeleted(moved)
+            if failed.isEmpty {
+                message = "元の\(noun)を\(moved.count)\(unit)、「ファイル」アプリの「最近削除した項目」に移しました。"
+            } else {
+                // 保存場所にゴミ箱がない場合は、完全に削除してよいか画面で確認する
+                needsPermanentDelete = failed
+            }
+            return
+        }
+
         do {
             try await ImageProcessor.delete(identifiers: ids)
-            deletedIDs.formUnion(ids)
-            deleteSelection.subtract(ids)
-            persist()
-            message = "元の\(isVideo ? "動画" : "写真")を\(ids.count)\(unit)削除しました。「最近削除した項目」から30日以内なら復元できます。"
+            markDeleted(Set(ids))
+            message = "元の\(noun)を\(ids.count)\(unit)削除しました。「最近削除した項目」から30日以内なら復元できます。"
         } catch {
             // iOS の確認ダイアログでキャンセルした場合もここに来る
             let nsError = error as NSError
@@ -305,6 +415,33 @@ final class JobRunner: Identifiable {
                 message = "削除できませんでした：\(error.localizedDescription)"
             }
         }
+    }
+
+    /// ゴミ箱に移せなかったファイルを、確認のうえで完全に削除する
+    func deletePermanently() async {
+        let urls = needsPermanentDelete.map { URL(fileURLWithPath: $0) }
+        needsPermanentDelete = []
+        guard !urls.isEmpty else { return }
+        isDeleting = true
+        defer { isDeleting = false }
+        let deleted = await Task.detached(priority: .userInitiated) {
+            FileProcessor.deletePermanently(urls)
+        }.value.map(\.path)
+        markDeleted(Set(deleted))
+        message = deleted.count == urls.count
+            ? "元の\(noun)を\(deleted.count)\(unit)削除しました。"
+            : "\(deleted.count)\(unit)削除しました。\(urls.count - deleted.count)\(unit)は削除できませんでした。"
+    }
+
+    func cancelPermanentDelete() {
+        needsPermanentDelete = []
+        message = "ゴミ箱に移せなかった\(noun)は、削除せずに残しました。"
+    }
+
+    private func markDeleted(_ ids: Set<String>) {
+        deletedIDs.formUnion(ids)
+        deleteSelection.subtract(ids)
+        persist()
     }
 }
 

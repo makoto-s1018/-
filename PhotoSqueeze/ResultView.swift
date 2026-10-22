@@ -4,6 +4,8 @@ import SwiftUI
 struct ResultView: View {
     @Bindable var runner: JobRunner
     let onClose: () -> Void
+    /// 「ファイル」アプリの元ファイルを削除する前の確認
+    @State private var confirmsFileDelete = false
 
     private var isVideo: Bool { runner.settings.mode == .video }
     private var noun: String { isVideo ? "動画" : "写真" }
@@ -31,6 +33,26 @@ struct ResultView: View {
                     if !runner.savedResults.isEmpty { deleteSection }
                 }
                 resultsSection
+            }
+            .alert("ゴミ箱に移せませんでした", isPresented: Binding(
+                get: { !runner.needsPermanentDelete.isEmpty },
+                set: { if !$0 && !runner.needsPermanentDelete.isEmpty { runner.cancelPermanentDelete() } }
+            )) {
+                Button("完全に削除", role: .destructive) {
+                    Task { await runner.deletePermanently() }
+                }
+                Button("削除しない", role: .cancel) {
+                    runner.cancelPermanentDelete()
+                }
+            } message: {
+                Text("保存場所にゴミ箱（最近削除した項目）がないため、\(runner.needsPermanentDelete.count)\(unit)は移せませんでした。完全に削除すると元に戻せません。")
+            }
+            .confirmationDialog("元の\(noun)を削除しますか？", isPresented: $confirmsFileDelete, titleVisibility: .visible) {
+                Button("削除する", role: .destructive) {
+                    Task { await runner.deleteOriginals() }
+                }
+            } message: {
+                Text("「ファイル」アプリの「最近削除した項目」に移します（iCloud Drive・このiPhone内なら30日間は復元できます）。")
             }
             .navigationTitle(runner.isRunning ? "処理中…" : "完了")
             .navigationBarTitleDisplayMode(.inline)
@@ -148,7 +170,9 @@ struct ResultView: View {
             Text(runner.settings.mode.title + "の結果")
         } footer: {
             if saved > 0 {
-                Text("新しい\(noun)は元の\(noun)と同じ撮影日で、写真アプリに保存されています。")
+                Text(runner.isFiles
+                     ? "新しい\(noun)は、元のファイルと同じフォルダーに「_圧縮」などを付けた名前で保存しました。"
+                     : "新しい\(noun)は元の\(noun)と同じ撮影日で、写真アプリに保存されています。")
             }
         }
     }
@@ -172,7 +196,11 @@ struct ResultView: View {
                 .buttonStyle(.borderless)
 
                 Button(role: .destructive) {
-                    Task { await runner.deleteOriginals() }
+                    if runner.isFiles {
+                        confirmsFileDelete = true
+                    } else {
+                        Task { await runner.deleteOriginals() }
+                    }
                 } label: {
                     HStack {
                         if runner.isDeleting { ProgressView() }

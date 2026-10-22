@@ -3,6 +3,7 @@ import SwiftUI
 
 struct ContentView: View {
     @Environment(PhotoLibrary.self) private var library
+    @Environment(FileLibrary.self) private var files
     @Environment(\.scenePhase) private var scenePhase
 
     @State private var settingsMode: JobMode?
@@ -11,6 +12,11 @@ struct ContentView: View {
     @State private var showsDuplicates = false
     /// 前回途中で止まった処理
     @State private var pendingJob: PendingJob?
+    /// 写真アプリ／「ファイル」アプリのどちらを表示しているか
+    @State private var source: LibrarySource = .photos
+
+    private var isFiles: Bool { source == .files }
+    private var selectionCount: Int { isFiles ? files.selection.count : library.selection.count }
 
     var body: some View {
         NavigationStack {
@@ -29,11 +35,20 @@ struct ContentView: View {
         }
         .task {
             library.load()
+            files.restore()
+            files.update(kind: library.mediaKind, grouping: library.grouping)
             refreshPendingJob()
+        }
+        .onChange(of: library.mediaKind) { _, kind in
+            files.update(kind: kind, grouping: library.grouping)
+        }
+        .onChange(of: library.grouping) { _, grouping in
+            files.update(kind: library.mediaKind, grouping: grouping)
         }
         .onChange(of: scenePhase) { _, phase in
             if phase == .active {
                 library.load()
+                if isFiles { files.reload() }
                 refreshPendingJob()
             }
             if phase == .background { runner?.appDidEnterBackground() }
@@ -41,8 +56,8 @@ struct ContentView: View {
         .sheet(item: $settingsMode, onDismiss: startPendingJob) { mode in
             JobSettingsView(
                 mode: mode,
-                count: library.selection.count,
-                videoDuration: library.selectedAssets.reduce(0) { $0 + $1.duration }
+                count: selectionCount,
+                videoDuration: isFiles ? 0 : library.selectedAssets.reduce(0) { $0 + $1.duration }
             ) { settings in
                 pendingSettings = settings
                 settingsMode = nil
@@ -53,6 +68,8 @@ struct ContentView: View {
                 runner = nil
                 library.clearSelection()
                 library.load()
+                files.clearSelection()
+                files.reload()
                 refreshPendingJob()
             }
         }
@@ -70,17 +87,32 @@ struct ContentView: View {
 
     /// 前回途中で止まった処理を、続きから再開する
     private func resumePendingJob(_ job: PendingJob) {
-        let fetched = PHAsset.fetchAssets(withLocalIdentifiers: job.remainingIDs, options: nil)
-        var byID: [String: PHAsset] = [:]
-        fetched.enumerateObjects { asset, _, _ in byID[asset.localIdentifier] = asset }
-        // 削除済みなどで見つからないものは飛ばし、元の順番で並べる
-        let assets = job.remainingIDs.compactMap { byID[$0] }
         pendingJob = nil
-        guard !assets.isEmpty else {
+        let items: [JobItem]
+        var folder: FolderAccess?
+        if let bookmark = job.folderBookmark {
+            // 「ファイル」アプリ：フォルダーを開き直し、残っているファイルだけを元の順番で並べる
+            guard let access = FolderAccess.resolve(bookmark) else {
+                PendingJobStore.clear()
+                return
+            }
+            folder = access
+            items = job.remainingIDs
+                .map { access.url.appendingPathComponent($0) }
+                .filter { FileManager.default.fileExists(atPath: $0.path) }
+                .map { JobItem.file($0) }
+        } else {
+            let fetched = PHAsset.fetchAssets(withLocalIdentifiers: job.remainingIDs, options: nil)
+            var byID: [String: PHAsset] = [:]
+            fetched.enumerateObjects { asset, _, _ in byID[asset.localIdentifier] = asset }
+            // 削除済みなどで見つからないものは飛ばし、元の順番で並べる
+            items = job.remainingIDs.compactMap { byID[$0] }.map { JobItem.asset($0) }
+        }
+        guard !items.isEmpty else {
             PendingJobStore.clear()
             return
         }
-        let resumed = JobRunner(resuming: job, assets: assets)
+        let resumed = JobRunner(resuming: job, items: items, folder: folder)
         runner = resumed
         resumed.start()
     }
@@ -94,7 +126,12 @@ struct ContentView: View {
     private func startPendingJob() {
         guard let settings = pendingSettings else { return }
         pendingSettings = nil
-        let job = JobRunner(assets: library.selectedAssets, settings: settings)
+        let job: JobRunner
+        if isFiles {
+            job = JobRunner(items: files.selectedItems.map { .file($0.url) }, settings: settings, folder: files.folder)
+        } else {
+            job = JobRunner(items: library.selectedAssets.map { .asset($0) }, settings: settings)
+        }
         runner = job
         job.start()
     }
@@ -114,6 +151,14 @@ struct ContentView: View {
                 .padding(.bottom, 8)
             }
 
+            Picker("場所", selection: $source) {
+                ForEach(LibrarySource.allCases) { source in
+                    Label(source.rawValue, systemImage: source == .photos ? "photo.stack" : "folder").tag(source)
+                }
+            }
+            .pickerStyle(.segmented)
+            .padding(.horizontal)
+
             Picker("種類", selection: $library.mediaKind) {
                 ForEach(MediaKind.allCases) { kind in
                     Label(kind.rawValue, systemImage: kind == .photo ? "photo" : "video").tag(kind)
@@ -129,20 +174,24 @@ struct ContentView: View {
             .padding(.horizontal)
             .padding(.bottom, 4)
 
-            if library.assets.isEmpty {
-                ContentUnavailableView("\(library.mediaKind.rawValue)がありません",
-                                       systemImage: library.mediaKind == .photo ? "photo.on.rectangle" : "video.slash")
-                    .padding(.top, 80)
-            }
+            if isFiles {
+                FileListView(kind: library.mediaKind)
+            } else {
+                if library.assets.isEmpty {
+                    ContentUnavailableView("\(library.mediaKind.rawValue)がありません",
+                                           systemImage: library.mediaKind == .photo ? "photo.on.rectangle" : "video.slash")
+                        .padding(.top, 80)
+                }
 
-            LazyVStack(spacing: 0, pinnedViews: .sectionHeaders) {
-                ForEach(library.groups) { group in
-                    Section {
-                        if !library.collapsed.contains(group.id) {
-                            PhotoGrid(assets: group.assets)
+                LazyVStack(spacing: 0, pinnedViews: .sectionHeaders) {
+                    ForEach(library.groups) { group in
+                        Section {
+                            if !library.collapsed.contains(group.id) {
+                                PhotoGrid(assets: group.assets)
+                            }
+                        } header: {
+                            GroupHeader(group: group)
                         }
-                    } header: {
-                        GroupHeader(group: group)
                     }
                 }
             }
@@ -153,7 +202,7 @@ struct ContentView: View {
     private var toolbarContent: some ToolbarContent {
         if library.hasAccess {
             ToolbarItem(placement: .topBarLeading) {
-                if library.mediaKind == .photo {
+                if library.mediaKind == .photo, !isFiles {
                     Button {
                         showsDuplicates = true
                     } label: {
@@ -164,8 +213,12 @@ struct ContentView: View {
             }
             ToolbarItem(placement: .topBarTrailing) {
                 Menu {
-                    Button("すべて選択", systemImage: "checkmark.circle") { library.selectAll() }
-                    Button("選択を解除", systemImage: "xmark.circle") { library.clearSelection() }
+                    Button("すべて選択", systemImage: "checkmark.circle") {
+                        if isFiles { files.selectAll() } else { library.selectAll() }
+                    }
+                    Button("選択を解除", systemImage: "xmark.circle") {
+                        if isFiles { files.clearSelection() } else { library.clearSelection() }
+                    }
                     if library.status == .limited {
                         Divider()
                         Text("アクセスが「選択した写真」に制限されています。設定アプリで変更できます。")
@@ -179,9 +232,9 @@ struct ContentView: View {
 
     private var bottomBar: some View {
         VStack(spacing: 8) {
-            Text(library.selection.isEmpty
+            Text(selectionCount == 0
                  ? "\(library.mediaKind.rawValue)をタップ、または日付の「選択」でまとめて選べます"
-                 : "\(library.selection.count)\(library.mediaKind.unit)を選択中")
+                 : "\(selectionCount)\(library.mediaKind.unit)を選択中")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
             HStack(spacing: 12) {
@@ -212,7 +265,7 @@ struct ContentView: View {
                 }
             }
             .controlSize(.large)
-            .disabled(library.selection.isEmpty)
+            .disabled(selectionCount == 0)
         }
         .padding(.horizontal)
         .padding(.top, 10)
@@ -266,6 +319,7 @@ private struct PendingJobBanner: View {
 
 private struct GroupHeader: View {
     @Environment(PhotoLibrary.self) private var library
+    @Environment(FileLibrary.self) private var files
     let group: PhotoGroup
 
     var body: some View {
@@ -325,6 +379,7 @@ private struct PhotoGrid: View {
 
 private struct ThumbnailCell: View {
     @Environment(PhotoLibrary.self) private var library
+    @Environment(FileLibrary.self) private var files
     @Environment(\.displayScale) private var displayScale
     let asset: PHAsset
     @State private var image: UIImage?
@@ -385,6 +440,7 @@ private struct ThumbnailCell: View {
 
 private struct AccessView: View {
     @Environment(PhotoLibrary.self) private var library
+    @Environment(FileLibrary.self) private var files
 
     var body: some View {
         ContentUnavailableView {

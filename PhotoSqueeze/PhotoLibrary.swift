@@ -21,6 +21,14 @@ enum MediaKind: String, CaseIterable, Identifiable {
     var unit: String { self == .photo ? "枚" : "本" }
 }
 
+/// どこの写真・動画を扱うか
+enum LibrarySource: String, CaseIterable, Identifiable {
+    case photos = "写真アプリ"
+    case files = "ファイル"
+
+    var id: Self { self }
+}
+
 struct PhotoGroup: Identifiable {
     let id: String
     let title: String
