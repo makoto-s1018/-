@@ -22,6 +22,7 @@ jobs:
 
       - name: ビルド（署名なし。署名は Sideloadly が自分の Apple ID で行う）
         run: |
+          set -o pipefail
           xcodebuild \
             -project PhotoSqueeze.xcodeproj \
             -target PhotoSqueeze \
@@ -31,12 +32,24 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
-            build
+            build 2>&1 | tee build.log
+
+      - name: エラー内容を表示（失敗したときだけ）
+        if: failure()
+        run: |
+          grep -E "error:" build.log | sort -u | head -30 | while IFS= read -r line; do
+            echo "::error::$line"
+          done
 
       - name: .ipa にまとめる
         run: |
           mkdir -p Payload
           cp -R build/Release-iphoneos/PhotoSqueeze.app Payload/
+          # アプリ本体が入っていない（プログラムのファイルが足りない）場合は失敗にする
+          if [ ! -f Payload/PhotoSqueeze.app/PhotoSqueeze ]; then
+            echo "::error::アプリ本体がありません。GitHub の PhotoSqueeze フォルダーに .swift ファイルがそろっているか確認してください"
+            exit 1
+          fi
           zip -qry PhotoSqueeze.ipa Payload
 
       - uses: actions/upload-artifact@v4
