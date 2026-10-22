@@ -75,7 +75,7 @@ struct ContentView: View {
             }
         }
         .fullScreenCover(isPresented: $showsDuplicates) {
-            DuplicateView(allAssets: library.assets, selectedAssets: library.selectedAssets) {
+            DuplicateView(allAssets: library.assets, selectedAssets: library.selectedAssets, kind: library.mediaKind) {
                 showsDuplicates = false
                 library.load()
             }
@@ -203,7 +203,7 @@ struct ContentView: View {
     private var toolbarContent: some ToolbarContent {
         if library.hasAccess {
             ToolbarItem(placement: .topBarLeading) {
-                if library.mediaKind == .photo, !isFiles {
+                if !isFiles {
                     Button {
                         showsDuplicates = true
                     } label: {

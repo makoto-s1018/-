@@ -5,6 +5,8 @@ import SwiftUI
 struct DuplicateView: View {
     let allAssets: [PHAsset]
     let selectedAssets: [PHAsset]
+    /// 写真・動画のどちらを探すか
+    let kind: MediaKind
     let onClose: () -> Void
 
     @State private var finder = DuplicateFinder()
@@ -20,7 +22,7 @@ struct DuplicateView: View {
                 case .done: resultView
                 }
             }
-            .navigationTitle("重複写真を探す")
+            .navigationTitle("重複\(kind.rawValue)を探す")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
@@ -52,19 +54,19 @@ struct DuplicateView: View {
         Form {
             Section {
                 Picker("探し方", selection: $strictness) {
-                    ForEach(DuplicateStrictness.allCases) { Text($0.rawValue).tag($0) }
+                    ForEach(DuplicateStrictness.allCases) { Text($0.label(for: kind)).tag($0) }
                 }
                 .pickerStyle(.segmented)
             } header: {
                 Text("探し方")
             } footer: {
-                Text(strictness.note)
+                Text(strictness.note(for: kind))
             }
 
             Section("探す範囲") {
                 Picker("範囲", selection: $onlySelected) {
-                    Text("すべての写真（\(allAssets.count)枚）").tag(false)
-                    Text("選択中の写真（\(selectedAssets.count)枚）").tag(true)
+                    Text("すべての\(kind.rawValue)（\(allAssets.count)\(kind.unit)）").tag(false)
+                    Text("選択中の\(kind.rawValue)（\(selectedAssets.count)\(kind.unit)）").tag(true)
                 }
                 .pickerStyle(.inline)
                 .labelsHidden()
@@ -83,7 +85,7 @@ struct DuplicateView: View {
                 .controlSize(.large)
                 .listRowBackground(Color.clear)
             } footer: {
-                Text("見つかった写真はすぐには削除しません。確認してから、削除する写真を選べます。")
+                Text("見つかった\(kind.rawValue)はすぐには削除しません。確認してから、削除する\(kind.rawValue)を選べます。")
             }
         }
     }
@@ -94,14 +96,14 @@ struct DuplicateView: View {
         VStack(spacing: 16) {
             if finder.phase == .grouping {
                 ProgressView()
-                Text("似ている写真をまとめています…")
+                Text("似ている\(kind.rawValue)をまとめています…")
             } else {
                 ProgressView(value: Double(finder.scanned), total: Double(max(finder.total, 1)))
-                Text("\(finder.scanned) / \(finder.total) 枚を確認中")
+                Text("\(finder.scanned) / \(finder.total) \(kind.unit)を確認中")
                     .font(.headline)
                     .monospacedDigit()
             }
-            Text("写真が多いと数分かかることがあります。アプリを閉じずにお待ちください。")
+            Text("\(kind.rawValue)が多いと数分かかることがあります。アプリを閉じずにお待ちください。")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
@@ -117,7 +119,7 @@ struct DuplicateView: View {
             ContentUnavailableView {
                 Label("重複は見つかりませんでした", systemImage: "checkmark.seal")
             } description: {
-                Text("「似ている写真も」で探すと、連写などの似た写真も見つかります。")
+                Text("「似ている\(kind.rawValue)も」で探すと、続けて撮った似た\(kind.rawValue)も見つかります。")
             } actions: {
                 Button("条件を変えて探す") { finder = DuplicateFinder() }
             }
@@ -137,13 +139,13 @@ struct DuplicateView: View {
 
     private var summary: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("\(finder.groups.count)組・\(finder.groups.reduce(0) { $0 + $1.assets.count })枚の重複が見つかりました")
+            Text("\(finder.groups.count)組・\(finder.groups.reduce(0) { $0 + $1.assets.count })\(kind.unit)の重複が見つかりました")
                 .font(.headline)
-            Picker("残す写真", selection: $finder.keepRule) {
+            Picker("残す\(kind.rawValue)", selection: $finder.keepRule) {
                 ForEach(KeepRule.allCases) { Text($0.rawValue).tag($0) }
             }
             .pickerStyle(.segmented)
-            Text("各組で1枚を残し、それ以外を削除候補にしています。写真をタップすると「残す／削除」を切り替えられます。お気に入りの写真は優先して残します。")
+            Text("各組で1\(kind.unit)を残し、それ以外を削除候補にしています。\(kind.rawValue)をタップすると「残す／削除」を切り替えられます。お気に入りの\(kind.rawValue)は優先して残します。")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
@@ -155,7 +157,7 @@ struct DuplicateView: View {
         } label: {
             HStack {
                 if finder.isDeleting { ProgressView() }
-                Label("選択した\(finder.deleteCount)枚を削除", systemImage: "trash")
+                Label("選択した\(finder.deleteCount)\(kind.unit)を削除", systemImage: "trash")
             }
             .frame(maxWidth: .infinity)
         }
@@ -181,7 +183,7 @@ private struct GroupCard: View {
                     Text(date, format: .dateTime.year().month().day().hour().minute())
                         .font(.subheadline.bold())
                 }
-                Text("\(group.assets.count)枚")
+                Text("\(group.assets.count)\(group.assets.first?.mediaType == .video ? "本" : "枚")")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
                 Spacer()
@@ -194,7 +196,9 @@ private struct GroupCard: View {
             ScrollView(.horizontal, showsIndicators: false) {
                 LazyHStack(spacing: 8) {
                     ForEach(group.assets, id: \.localIdentifier) { asset in
-                        DuplicateCell(asset: asset, marked: finder.deleteSelection.contains(asset.localIdentifier))
+                        DuplicateCell(asset: asset,
+                                      marked: finder.deleteSelection.contains(asset.localIdentifier),
+                                      size: finder.videoSizes[asset.localIdentifier] ?? 0)
                             .onTapGesture { finder.toggle(asset) }
                     }
                 }
@@ -206,8 +210,17 @@ private struct GroupCard: View {
 }
 
 private struct DuplicateCell: View {
+    static func durationText(_ seconds: TimeInterval) -> String {
+        let total = Int(seconds.rounded())
+        return total >= 3600
+            ? String(format: "%d:%02d:%02d", total / 3600, total % 3600 / 60, total % 60)
+            : String(format: "%d:%02d", total / 60, total % 60)
+    }
+
     let asset: PHAsset
     let marked: Bool
+    /// 動画のファイルサイズ（分からなければ 0）
+    let size: Int
     @Environment(\.displayScale) private var displayScale
     @State private var image: UIImage?
 
@@ -247,6 +260,11 @@ private struct DuplicateCell: View {
                     RoundedRectangle(cornerRadius: 8)
                         .stroke(marked ? Color.red : Color.green, lineWidth: 2)
                 }
+            if asset.mediaType == .video {
+                Text(Self.durationText(asset.duration) + (size > 0 ? "・\(size.byteString)" : ""))
+                    .font(.caption2.monospacedDigit())
+                    .foregroundStyle(.secondary)
+            }
             Text("\(asset.pixelWidth)×\(asset.pixelHeight)")
                 .font(.caption2.monospacedDigit())
                 .foregroundStyle(.secondary)

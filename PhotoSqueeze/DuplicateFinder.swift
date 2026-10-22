@@ -1,3 +1,4 @@
+import AVFoundation
 import Photos
 import UIKit
 
@@ -25,6 +26,22 @@ enum DuplicateStrictness: String, CaseIterable, Identifiable {
         case .similar: "連写や、同じ場所で続けて撮った写真（撮影時刻が10分以内）もまとめて探します。残す写真をよく確認してください。"
         }
     }
+
+    /// 画面に出す名前（写真・動画で言い方を変える）
+    func label(for kind: MediaKind) -> String {
+        switch self {
+        case .same: "同じ\(kind.rawValue)だけ"
+        case .similar: "似ている\(kind.rawValue)も"
+        }
+    }
+
+    func note(for kind: MediaKind) -> String {
+        guard kind == .video else { return note }
+        switch self {
+        case .same: return "同じ動画の保存し直し・圧縮前後の動画・LINEなどで受け取った同じ動画を探します（最初の場面の見た目と長さで判定）。"
+        case .similar: return "同じ場所で続けて撮った、見た目と長さが近い動画（撮影時刻が10分以内）もまとめて探します。残す動画をよく確認してください。"
+        }
+    }
 }
 
 /// グループの中でどれを残すか（残す1枚以外が削除候補になる）
@@ -47,6 +64,8 @@ final class DuplicateFinder {
     private(set) var groups: [DuplicateGroup] = []
     private(set) var isDeleting = false
     private var scanTask: Task<[PerceptualHash.Entry], Never>?
+    /// 動画のファイルサイズ（同じ解像度の動画で「高画質／軽い方」を決めるのに使う）
+    private(set) var videoSizes: [String: Int] = [:]
 
     var deleteSelection: Set<String> = []
     var message: String?
@@ -85,6 +104,13 @@ final class DuplicateFinder {
         groups = found
             .map { DuplicateGroup(assets: $0.map { assets[$0] }) }
             .sorted { ($0.assets.first?.creationDate ?? .distantPast) > ($1.assets.first?.creationDate ?? .distantPast) }
+
+        // 動画は同じ解像度のこともあるので、ファイルの大きさも調べておく（見つかった組の分だけ）
+        var sizes: [String: Int] = [:]
+        for asset in groups.flatMap(\.assets) where asset.mediaType == .video {
+            sizes[asset.localIdentifier] = await Self.videoFileSize(asset)
+        }
+        videoSizes = sizes
         applyKeepRule()
         phase = .done
     }
@@ -92,19 +118,24 @@ final class DuplicateFinder {
     /// 残す写真を先頭に並べ替え、それ以外を削除候補にする
     private func applyKeepRule() {
         let rule = keepRule
+        let sizes = videoSizes
         groups = groups.map { group in
             var group = group
-            group.assets.sort { Self.keepFirst($0, $1, rule: rule) }
+            group.assets.sort { Self.keepFirst($0, $1, rule: rule, sizes: sizes) }
             return group
         }
         deleteSelection = Set(groups.flatMap { $0.assets.dropFirst().map(\.localIdentifier) })
     }
 
-    private static func keepFirst(_ a: PHAsset, _ b: PHAsset, rule: KeepRule) -> Bool {
+    private static func keepFirst(_ a: PHAsset, _ b: PHAsset, rule: KeepRule, sizes: [String: Int]) -> Bool {
         if a.isFavorite != b.isFavorite { return a.isFavorite }
         let pa = a.pixelWidth * a.pixelHeight
         let pb = b.pixelWidth * b.pixelHeight
         if pa != pb { return rule == .highest ? pa > pb : pa < pb }
+        // 解像度が同じ動画は、ファイルが大きい方を高画質とみなす
+        let sa = sizes[a.localIdentifier] ?? 0
+        let sb = sizes[b.localIdentifier] ?? 0
+        if sa != sb, sa > 0, sb > 0 { return rule == .highest ? sa > sb : sa < sb }
         // 同じ大きさなら古い方（最初に保存された方）を残す
         return (a.creationDate ?? .distantFuture) < (b.creationDate ?? .distantFuture)
     }
@@ -132,13 +163,30 @@ final class DuplicateFinder {
                 return group.assets.count >= 2 ? group : nil
             }
             deleteSelection.subtract(deleted)
-            message = "\(ids.count)枚を削除しました。「最近削除した項目」から30日以内なら復元できます。"
+            message = "\(ids.count)件を削除しました。「最近削除した項目」から30日以内なら復元できます。"
         } catch {
             let nsError = error as NSError
             if nsError.domain == PHPhotosErrorDomain, nsError.code == PHPhotosError.userCancelled.rawValue {
                 message = "削除をキャンセルしました。"
             } else {
                 message = "削除できませんでした：\(error.localizedDescription)"
+            }
+        }
+    }
+
+    /// 動画のファイルサイズ（端末にある場合だけ。分からなければ 0）
+    private static func videoFileSize(_ asset: PHAsset) async -> Int {
+        let options = PHVideoRequestOptions()
+        options.isNetworkAccessAllowed = false
+        options.version = .current
+        return await withCheckedContinuation { continuation in
+            var resumed = false
+            PHImageManager.default().requestAVAsset(forVideo: asset, options: options) { avAsset, _, _ in
+                guard !resumed else { return }
+                resumed = true
+                let url = (avAsset as? AVURLAsset)?.url
+                let size = url.flatMap { try? $0.resourceValues(forKeys: [.fileSizeKey]).fileSize } ?? 0
+                continuation.resume(returning: size)
             }
         }
     }
@@ -176,7 +224,9 @@ final class DuplicateFinder {
                 if let hash {
                     let aspect = Double(asset.pixelWidth) / Double(max(asset.pixelHeight, 1))
                     let date = asset.creationDate?.timeIntervalSince1970
-                    entries.append(.init(index: index, hash: hash, aspect: aspect, date: date))
+                    // 動画は最初の場面の見た目に加えて、長さも比べる（写真は 0）
+                    let duration = asset.mediaType == .video ? asset.duration : 0
+                    entries.append(.init(index: index, hash: hash, aspect: aspect, date: date, duration: duration))
                 }
             }
             if index % 50 == 0 { await progress(processed) }
@@ -193,6 +243,8 @@ enum PerceptualHash {
         let hash: UInt64
         let aspect: Double
         let date: TimeInterval?
+        /// 動画の長さ（秒）。写真は 0
+        let duration: Double
     }
 
     /// 1組あたりの上限（これを超える分は次の組に回す）
@@ -250,6 +302,11 @@ enum PerceptualHash {
                       abs(base.aspect - other.aspect) <= base.aspect * 0.03 else { continue }
                 if let maxTimeGap {
                     guard let a = base.date, let b = other.date, abs(a - b) <= maxTimeGap else { continue }
+                }
+                // 動画は長さがほぼ同じもの（1秒、または長さの2%以内）だけを同じ組にする
+                if base.duration > 0 || other.duration > 0 {
+                    let tolerance = max(1, base.duration * 0.02)
+                    guard abs(base.duration - other.duration) <= tolerance else { continue }
                 }
                 assigned[j] = true
                 members.append(other.index)
